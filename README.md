@@ -1,6 +1,6 @@
 # SMuLE
 
-**Shared Multimedia Layer Engine** — a small multimedia backend above SDL3, intended for use by MuM and Substrate.
+**Shared Multimedia Layer Engine** — a small multimedia backend above SDL3, intended for use by MuM and Substrate: two seperate small projects I've been working on for a while.
 
 Status: experimental. This repository is being prepared for extraction; no implementation has been imported yet.
 
@@ -20,7 +20,3 @@ The extraction should preserve working rendering, blending, sampling, ordering a
 Graphics and compositing come first. Shared audio synthesis/mixing, scheduling and input handling are subsequent milestones.
 
 SMuLE supplies multimedia mechanisms; consumers retain their application loops, protocol or scripting interfaces, replay coordination and hot-reload policy.
-
-## Licensing
-
-A project license has not yet been selected. Imported code must preserve its existing copyright notices and comply with its source license.
