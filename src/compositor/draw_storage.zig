@@ -5,6 +5,7 @@ const sdl = @import("sdl").sdl;
 pub const page_size = 64;
 pub const owner_count = t.max_layers + 1;
 pub const immediate_owner = t.max_layers;
+pub const texture_words = (t.max_texture_ids + 63) / 64;
 pub const none = std.math.maxInt(u32);
 
 /// ceiling limits admitted draws; reserved supplies backing without hot-path
@@ -95,6 +96,8 @@ pub const Storage = struct {
     config: Config = .{ .ceiling = 0, .reserved = 0 },
     backing: Backing = .{},
     owners: [owner_count]Owner = @splat(.{}),
+    texture_owners: [t.max_texture_ids]t.OwnerMask = @splat(0),
+    owner_textures: [owner_count][texture_words]u64 = @splat(@splat(0)),
     count: u32 = 0,
     payload_count: u32 = 0,
     command_free: u32 = none,
@@ -338,6 +341,15 @@ pub const Storage = struct {
         page.used += 1;
         stream.count += 1;
         self.count += 1;
+        const texture_id: u16 = @truncate(command.sort_key >> 32);
+        if (texture_id != 0 and texture_id < t.max_texture_ids) {
+            const word = &self.owner_textures[owner][texture_id / 64];
+            const bit = @as(u64, 1) << @as(u6, @truncate(texture_id));
+            if (word.* & bit == 0) {
+                word.* |= bit;
+                self.texture_owners[texture_id] |= t.ownerBit(owner);
+            }
+        }
         return .{ .index = slot, .generation = page.generation };
     }
 
@@ -446,6 +458,18 @@ pub const Storage = struct {
         owner: u8,
     ) void {
         const stream = self.owners[owner];
+        if (stream.count != 0) {
+            const owner_bit = t.ownerBit(owner);
+            for (&self.owner_textures[owner], 0..) |*word, word_index| {
+                var remaining = word.*;
+                while (remaining != 0) {
+                    const texture_id = word_index * 64 + @ctz(remaining);
+                    self.texture_owners[texture_id] &= ~owner_bit;
+                    remaining &= remaining - 1;
+                }
+                word.* = 0;
+            }
+        }
         var page = stream.first;
         while (page != none) {
             const descriptor = &self.backing.command_pages[page];

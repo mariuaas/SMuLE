@@ -24,16 +24,16 @@ fn operationLayer(
     if (ctx.state.frame_state != .updating) return error.WrongFrameState;
     if (layer_id >= t.max_layers) return error.InvalidLayerId;
     const layer = &ctx.state.layers[layer_id];
-    if (layer.canvas_mode == .legacy_rgba) return error.OperationCanvasRequired;
+    if (!ctx.state.layer_masks.has(.operation, layer_id)) return error.OperationCanvasRequired;
     return layer;
 }
 
 fn invalidateCanvas(
     ctx: *Instance,
-    layer: *t.LayerState,
+    layer_id: usize,
 ) void {
-    layer.target_dirty = true;
-    layer.present_dirty = true;
+    ctx.state.layer_masks.set(.target_dirty, layer_id, true);
+    ctx.state.layer_masks.set(.present_dirty, layer_id, true);
     ctx.frame_ready = false;
     ctx.changes.present_needed = true;
 }
@@ -56,7 +56,7 @@ pub fn setCanvasExtent(
     try textures.resizeLayerTarget(ctx, layer_id, resolved_width, resolved_height);
     layer.canvas_width = @intCast(resolved_width);
     layer.canvas_height = @intCast(resolved_height);
-    invalidateCanvas(ctx, layer);
+    invalidateCanvas(ctx, layer_id);
 }
 
 pub fn setContentScroll(
@@ -70,7 +70,7 @@ pub fn setContentScroll(
         return;
     layer.content_scroll_x = horizontal;
     layer.content_scroll_y = vertical;
-    invalidateCanvas(ctx, layer);
+    invalidateCanvas(ctx, layer_id);
 }
 
 pub fn setSurfaceClip(
@@ -82,7 +82,7 @@ pub fn setSurfaceClip(
     const effective: t.SurfaceClip = if (clip.w == 0 or clip.h == 0) .{} else clip;
     if (std.meta.eql(layer.surface_clip, effective)) return;
     layer.surface_clip = effective;
-    invalidateCanvas(ctx, layer);
+    invalidateCanvas(ctx, layer_id);
 }
 
 pub fn setAffine(
@@ -93,7 +93,7 @@ pub fn setAffine(
     const layer = try operationLayer(ctx, layer_id);
     if (std.meta.eql(layer.affine, affine)) return;
     layer.affine = affine;
-    layer.present_dirty = true;
+    ctx.state.layer_masks.set(.present_dirty, layer_id, true);
     ctx.frame_ready = false;
     ctx.changes.present_needed = true;
 }
@@ -106,7 +106,8 @@ pub fn setCanvasSampling(
     const layer = try operationLayer(ctx, layer_id);
     if (layer.sampling == mode) return;
     layer.sampling = mode;
-    layer.present_dirty = true;
+    ctx.state.layer_masks.set(.bilinear_canvas, layer_id, mode == .bilinear);
+    ctx.state.layer_masks.set(.present_dirty, layer_id, true);
     ctx.frame_ready = false;
     ctx.changes.present_needed = true;
 }
@@ -115,7 +116,7 @@ fn isLayerVisible(
     ctx: *Instance,
     layer_id: usize,
 ) bool {
-    return layer_id < t.max_layers and ctx.state.layers[layer_id].visible;
+    return layer_id < t.max_layers and ctx.state.layer_masks.has(.visible, layer_id);
 }
 
 fn hasPresentableSurface(
@@ -155,22 +156,24 @@ pub fn setCanvasMode(
         );
     }
     layer.canvas_mode = mode;
-    layer.target_dirty = true;
-    layer.present_dirty = true;
-    layer.order_dirty = true;
+    ctx.state.layer_masks.set(.operation, layer_id, mode != .legacy_rgba);
+    ctx.state.layer_masks.set(.target_dirty, layer_id, true);
+    ctx.state.layer_masks.set(.present_dirty, layer_id, true);
+    ctx.state.layer_masks.set(.order_dirty, layer_id, true);
     ctx.frame_ready = false;
     ctx.changes.scene_changed = true;
 }
 
 fn setLayerChannel(
-    layer: *t.LayerState,
+    ctx: *Instance,
+    layer_id: usize,
     channel: *u8,
     value: i32,
 ) t.LayerPropWake {
     const clamped: u8 = @intCast(std.math.clamp(value, 0, 255));
     if (channel.* == clamped) return .none;
     channel.* = clamped;
-    layer.present_dirty = true;
+    ctx.state.layer_masks.set(.present_dirty, layer_id, true);
     return .present_needed;
 }
 
@@ -180,14 +183,15 @@ fn applyLayerProp(
 ) t.LayerPropWake {
     if (cmd.layer_id >= t.max_layers) return .none;
 
-    const layer = &ctx.state.layers[cmd.layer_id];
+    const layer_id = cmd.layer_id;
+    const layer = &ctx.state.layers[layer_id];
     const field = @as(t.LayerPropField, @enumFromInt(cmd.field));
     switch (field) {
         .visible => {
             const visible = cmd.value != 0;
-            if (layer.visible == visible) return .none;
-            layer.visible = visible;
-            layer.order_dirty = true;
+            if (ctx.state.layer_masks.has(.visible, layer_id) == visible) return .none;
+            ctx.state.layer_masks.set(.visible, layer_id, visible);
+            ctx.state.layer_masks.set(.order_dirty, layer_id, true);
             return .scene_changed;
         },
         .z => {
@@ -195,13 +199,13 @@ fn applyLayerProp(
             const z_i16: i16 = @intCast(z);
             if (layer.z == z_i16) return .none;
             layer.z = z_i16;
-            layer.order_dirty = true;
+            ctx.state.layer_masks.set(.order_dirty, layer_id, true);
             return .scene_changed;
         },
-        .opacity => return setLayerChannel(layer, &layer.opacity, cmd.value),
-        .tint_r => return setLayerChannel(layer, &layer.tint_r, cmd.value),
-        .tint_g => return setLayerChannel(layer, &layer.tint_g, cmd.value),
-        .tint_b => return setLayerChannel(layer, &layer.tint_b, cmd.value),
+        .opacity => return setLayerChannel(ctx, layer_id, &layer.opacity, cmd.value),
+        .tint_r => return setLayerChannel(ctx, layer_id, &layer.tint_r, cmd.value),
+        .tint_g => return setLayerChannel(ctx, layer_id, &layer.tint_g, cmd.value),
+        .tint_b => return setLayerChannel(ctx, layer_id, &layer.tint_b, cmd.value),
         .clear_r, .clear_g, .clear_b, .clear_a => {
             const was_presentable = hasPresentableSurface(layer);
             const channel = switch (field) {
@@ -211,21 +215,22 @@ fn applyLayerProp(
                 .clear_a => &layer.clear_a,
                 else => unreachable,
             };
-            const wake = setLayerChannel(layer, channel, cmd.value);
-            if (wake != .none) layer.target_dirty = true;
-            if (was_presentable != hasPresentableSurface(layer)) layer.order_dirty = true;
+            const wake = setLayerChannel(ctx, layer_id, channel, cmd.value);
+            ctx.state.layer_masks.set(.clear_alpha_nonzero, layer_id, layer.clear_a != 0);
+            if (wake != .none) ctx.state.layer_masks.set(.target_dirty, layer_id, true);
+            if (was_presentable != hasPresentableSurface(layer)) ctx.state.layer_masks.set(.order_dirty, layer_id, true);
             return wake;
         },
         .scroll_x => {
             if (layer.scroll_x == cmd.value) return .none;
             layer.scroll_x = cmd.value;
-            layer.present_dirty = true;
+            ctx.state.layer_masks.set(.present_dirty, layer_id, true);
             return .present_needed;
         },
         .scroll_y => {
             if (layer.scroll_y == cmd.value) return .none;
             layer.scroll_y = cmd.value;
-            layer.present_dirty = true;
+            ctx.state.layer_masks.set(.present_dirty, layer_id, true);
             return .present_needed;
         },
         .clip_x => {
@@ -233,7 +238,7 @@ fn applyLayerProp(
             const clip_x_i16: i16 = @intCast(clip_x);
             if (layer.clip_x == clip_x_i16) return .none;
             layer.clip_x = clip_x_i16;
-            layer.present_dirty = true;
+            ctx.state.layer_masks.set(.present_dirty, layer_id, true);
             return .present_needed;
         },
         .clip_y => {
@@ -241,7 +246,7 @@ fn applyLayerProp(
             const clip_y_i16: i16 = @intCast(clip_y);
             if (layer.clip_y == clip_y_i16) return .none;
             layer.clip_y = clip_y_i16;
-            layer.present_dirty = true;
+            ctx.state.layer_masks.set(.present_dirty, layer_id, true);
             return .present_needed;
         },
         .clip_w => {
@@ -249,7 +254,7 @@ fn applyLayerProp(
             const clip_w_u16: u16 = @intCast(clip_w);
             if (layer.clip_w == clip_w_u16) return .none;
             layer.clip_w = clip_w_u16;
-            layer.present_dirty = true;
+            ctx.state.layer_masks.set(.present_dirty, layer_id, true);
             return .present_needed;
         },
         .clip_h => {
@@ -257,7 +262,7 @@ fn applyLayerProp(
             const clip_h_u16: u16 = @intCast(clip_h);
             if (layer.clip_h == clip_h_u16) return .none;
             layer.clip_h = clip_h_u16;
-            layer.present_dirty = true;
+            ctx.state.layer_masks.set(.present_dirty, layer_id, true);
             return .present_needed;
         },
         .blend_mode => {
@@ -265,7 +270,7 @@ fn applyLayerProp(
             const blend_mode_u8: u8 = @intCast(blend_mode);
             if (layer.blend_mode == blend_mode_u8) return .none;
             layer.blend_mode = blend_mode_u8;
-            layer.present_dirty = true;
+            ctx.state.layer_masks.set(.present_dirty, layer_id, true);
             return .present_needed;
         },
         _ => {
@@ -281,12 +286,7 @@ fn applyLayerProp(
 }
 
 pub fn hasVisibleRetainedLayers(ctx: *Instance) bool {
-    for (ctx.state.layers) |layer| {
-        if (layer.visible and hasPresentableSurface(&layer)) {
-            return true;
-        }
-    }
-    return false;
+    return ctx.state.layer_masks.presentable() != 0;
 }
 
 pub fn invalidateTexture(
@@ -301,6 +301,7 @@ pub fn invalidateTexture(
 }
 
 pub fn invalidateOperationReferences(ctx: *Instance, texture_id: u16) void {
+    if (texture_id == 0 or texture_id >= t.max_texture_ids) return;
     invalidateReferences(ctx, texture_id, false, true);
 }
 
@@ -310,27 +311,15 @@ fn invalidateReferences(
     geometry_changed: bool,
     comptime operation_only: bool,
 ) void {
-    for (&ctx.state.layers, 0..) |*layer, layer_id| {
-        if (operation_only and layer.canvas_mode == .legacy_rgba) continue;
-        var iterator = ctx.draw_storage.iterator(@intCast(layer_id)) catch unreachable;
-        while (iterator.nextRef()) |reference| {
-            if (geometry.unpackTextureId(reference.key) != texture_id) continue;
-            if (geometry_changed) layer.geometry_dirty = true;
-            layer.target_dirty = true;
-            layer.present_dirty = true;
-            ctx.changes.present_needed = true;
-            ctx.frame_ready = false;
-            break;
-        }
-    }
-    if (!operation_only) {
-        var iterator = ctx.draw_storage.iterator(draw_storage.immediate_owner) catch unreachable;
-        while (iterator.nextRef()) |reference| {
-            if (geometry.unpackTextureId(reference.key) != texture_id) continue;
-            ctx.changes.present_needed = true;
-            ctx.frame_ready = false;
-            break;
-        }
+    const owners = ctx.draw_storage.texture_owners[texture_id] &
+        (if (operation_only) ctx.state.layer_masks.operation else t.retained_owner_bits | t.immediate_owner_bit);
+    const retained = owners & t.retained_owner_bits;
+    if (geometry_changed) ctx.state.layer_masks.geometry_dirty |= retained;
+    ctx.state.layer_masks.target_dirty |= retained;
+    ctx.state.layer_masks.present_dirty |= retained;
+    if (owners != 0) {
+        ctx.changes.present_needed = true;
+        ctx.frame_ready = false;
     }
 }
 
@@ -486,16 +475,19 @@ fn compileRetainedLayerWithMetadata(
     layer.simple_draw_count = simple_draws;
     layer.complex_draw_count = complex_draws;
     if (!direct_cache) geometry.transferCache(ctx, layer_id, true);
-    layer.geometry_dirty = false;
+    ctx.state.layer_masks.set(.geometry_dirty, layer_id, false);
 }
 pub fn compileDirtyRetainedLayers(ctx: *Instance) LayerError!void {
-    for (&ctx.state.layers, 0..) |*layer, layer_id| {
-        if (!layer.geometry_dirty) continue;
-        if (!layer.visible and layer.slab_count == 0) {
+    var remaining = ctx.state.layer_masks.geometry_dirty;
+    while (remaining != 0) {
+        const layer_id = @ctz(remaining);
+        remaining &= remaining - 1;
+        const layer = &ctx.state.layers[layer_id];
+        if ((ctx.state.layer_masks.visible | ctx.state.layer_masks.nonempty) & t.ownerBit(layer_id) == 0) {
             layer.cached_vertex_count = 0;
             layer.cached_index_count = 0;
             layer.run_count = 0;
-            layer.geometry_dirty = false;
+            ctx.state.layer_masks.set(.geometry_dirty, layer_id, false);
             continue;
         }
         try compileRetainedLayer(ctx, layer_id);
@@ -503,11 +495,7 @@ pub fn compileDirtyRetainedLayers(ctx: *Instance) LayerError!void {
 }
 
 pub fn hasRetainedOrderDirty(ctx: *Instance) bool {
-    for (ctx.state.layers) |layer| {
-        if (layer.order_dirty) return true;
-    }
-
-    return ctx.state.retained_composite_entry_count == 0;
+    return ctx.state.layer_masks.order_dirty != 0 or ctx.state.retained_composite_entry_count == 0;
 }
 
 pub fn getLayerStateSnapshot(ctx: *Instance, layer_id: u8) ?t.LayerStateSnapshot {
@@ -515,7 +503,7 @@ pub fn getLayerStateSnapshot(ctx: *Instance, layer_id: u8) ?t.LayerStateSnapshot
 
     const layer = &ctx.state.layers[layer_id];
     return .{
-        .visible = layer.visible,
+        .visible = ctx.state.layer_masks.has(.visible, layer_id),
         .z = layer.z,
         .opacity = layer.opacity,
         .tint_r = layer.tint_r,
@@ -525,9 +513,9 @@ pub fn getLayerStateSnapshot(ctx: *Instance, layer_id: u8) ?t.LayerStateSnapshot
         .clear_g = layer.clear_g,
         .clear_b = layer.clear_b,
         .clear_a = layer.clear_a,
-        .geometry_dirty = layer.geometry_dirty,
-        .order_dirty = layer.order_dirty,
-        .present_dirty = layer.present_dirty,
+        .geometry_dirty = ctx.state.layer_masks.has(.geometry_dirty, layer_id),
+        .order_dirty = ctx.state.layer_masks.has(.order_dirty, layer_id),
+        .present_dirty = ctx.state.layer_masks.has(.present_dirty, layer_id),
         .slab_count = layer.slab_count,
         .scroll_x = layer.scroll_x,
         .scroll_y = layer.scroll_y,
@@ -563,7 +551,7 @@ pub fn stageLayerDraws(ctx: *Instance, instructions: []const t.ExternalDrawInstr
             continue;
         const texture_id = ctx.state.graphics[@intCast(ext.graphic_index)].texture_ids[@intCast(ext.palette_index)];
         if (texture_id == 0 or texture_id >= t.max_texture_ids) continue;
-        if (ctx.state.operation_sources[texture_id].exclusive and ctx.state.layers[layer_id].canvas_mode == .legacy_rgba)
+        if (ctx.state.operation_sources[texture_id].exclusive and !ctx.state.layer_masks.has(.operation, layer_id))
             return error.UnsupportedOperationResource;
         var flip: u16 = 0;
         if (ext.flip_h != 0) flip |= 1;
@@ -613,7 +601,7 @@ fn validateLayerInstruction(
         return error.InvalidLayerId;
     if (primitive == .line and primitive.line.layer_id != owner)
         return error.InvalidLayerId;
-    if (primitive != .none and ctx.state.layers[owner].canvas_mode == .legacy_rgba)
+    if (primitive != .none and !ctx.state.layer_masks.has(.operation, owner))
         return error.OperationCanvasRequired;
     const texture_id = geometry.unpackTextureId(instruction.sort_key);
     if (primitive == .line and texture_id != 0)
@@ -622,7 +610,7 @@ fn validateLayerInstruction(
     if (!untextured) {
         if (texture_id == 0 or texture_id >= t.max_texture_ids or ctx.state.texture_table[texture_id] == null)
             return error.InvalidTextureId;
-        if (ctx.state.operation_sources[texture_id].exclusive and ctx.state.layers[owner].canvas_mode == .legacy_rgba)
+        if (ctx.state.operation_sources[texture_id].exclusive and !ctx.state.layer_masks.has(.operation, owner))
             return error.UnsupportedOperationResource;
     }
     if (primitive == .sprite or (primitive == .none and instruction.kind == .raw_uv_quad)) {
@@ -715,10 +703,11 @@ pub fn commitLayerReplacement(ctx: *Instance) LayerError!void {
     ctx.draw_storage.commitReplacement();
     const layer = &ctx.state.layers[layer_id];
     layer.slab_count = ctx.draw_storage.owners[layer_id].count;
-    layer.geometry_dirty = true;
-    layer.order_dirty = true;
-    layer.target_dirty = true;
-    layer.present_dirty = true;
+    ctx.state.layer_masks.set(.nonempty, layer_id, layer.slab_count != 0);
+    ctx.state.layer_masks.set(.geometry_dirty, layer_id, true);
+    ctx.state.layer_masks.set(.order_dirty, layer_id, true);
+    ctx.state.layer_masks.set(.target_dirty, layer_id, true);
+    ctx.state.layer_masks.set(.present_dirty, layer_id, true);
     layer.run_count = 0;
     layer.runs = &.{};
     layer.cached_vertex_count = 0;
@@ -756,10 +745,11 @@ pub fn clearLayerContents(ctx: *Instance, layer_id: u8) LayerError!void {
         return error.TransactionActive;
     const layer = &ctx.state.layers[layer_id];
     layer.slab_count = 0;
-    layer.geometry_dirty = true;
-    layer.order_dirty = true;
-    layer.target_dirty = true;
-    layer.present_dirty = true;
+    ctx.state.layer_masks.set(.nonempty, layer_id, false);
+    ctx.state.layer_masks.set(.geometry_dirty, layer_id, true);
+    ctx.state.layer_masks.set(.order_dirty, layer_id, true);
+    ctx.state.layer_masks.set(.target_dirty, layer_id, true);
+    ctx.state.layer_masks.set(.present_dirty, layer_id, true);
     layer.run_count = 0;
     layer.cached_vertex_count = 0;
     layer.cached_index_count = 0;
@@ -793,11 +783,12 @@ pub fn resetLayer(ctx: *Instance, layer_id: u8) LayerError!void {
     ctx.state.layers[layer_id] = .{
         .target_texture_id = old_target_texture_id,
         .backing = backing,
-        .geometry_dirty = true,
-        .order_dirty = true,
-        .target_dirty = true,
-        .present_dirty = true,
     };
+    ctx.state.layer_masks.syncDerived(layer_id, &ctx.state.layers[layer_id]);
+    ctx.state.layer_masks.set(.visible, layer_id, true);
+    inline for (.{ .geometry_dirty, .order_dirty, .target_dirty, .present_dirty }) |field| {
+        ctx.state.layer_masks.set(field, layer_id, true);
+    }
     try ctx.draw_storage.clear(layer_id);
     ctx.changes.scene_changed = true;
     ctx.frame_ready = false;

@@ -10,6 +10,101 @@ fn command(sequence: u64) rendering.types.DrawInstruction {
     return result;
 }
 
+fn checkDependencies(pool: *const storage.Storage) !void {
+    var expected: [rendering.types.max_texture_ids]rendering.types.OwnerMask = @splat(0);
+    for (0..storage.owner_count) |owner| {
+        var textures: [storage.texture_words]u64 = @splat(0);
+        var iterator = try pool.iterator(@intCast(owner));
+        while (iterator.nextRef()) |reference| {
+            const texture_id = rendering.geometry.unpackTextureId(reference.key);
+            if (texture_id == 0 or texture_id >= expected.len) continue;
+            expected[texture_id] |= rendering.types.ownerBit(owner);
+            textures[texture_id / 64] |= @as(u64, 1) << @as(u6, @truncate(texture_id));
+        }
+        try std.testing.expectEqualSlices(u64, &textures, &pool.owner_textures[owner]);
+    }
+    try std.testing.expectEqualSlices(rendering.types.OwnerMask, &expected, &pool.texture_owners);
+}
+
+test "duplicate dependencies survive rejected admission staging and replacement validation" {
+    var pool = try storage.Storage.init(std.testing.allocator, .{ .ceiling = 3, .reserved = 3 });
+    defer pool.deinit();
+    var draw = command(0);
+    draw.sort_key = rendering.geometry.packKey(0, 7, 0, true);
+    _ = try pool.append(31, draw, .none);
+    _ = try pool.append(31, draw, .none);
+    _ = try pool.append(storage.immediate_owner, draw, .none);
+    try checkDependencies(&pool);
+    try equal(rendering.types.ownerBit(31) | rendering.types.immediate_owner_bit, pool.texture_owners[7]);
+    draw.sort_key = rendering.geometry.packKey(0, 9, 0, true);
+    try std.testing.expectError(error.CapacityExceeded, pool.append(0, draw, .none));
+    try pool.beginReplacement(31);
+    try std.testing.expectError(error.PayloadCapacityExceeded, pool.stage(draw, .{ .sprite = .{} }));
+    for (0..3) |_| try pool.stage(draw, .none);
+    try std.testing.expectError(error.ReservationExceeded, pool.stage(draw, .none));
+    try std.testing.expectError(error.CapacityExceeded, pool.validateReplacement());
+    try checkDependencies(&pool);
+    pool.abortReplacement();
+    try checkDependencies(&pool);
+    try pool.clear(31);
+    try equal(rendering.types.immediate_owner_bit, pool.texture_owners[7]);
+    try equal(@as(rendering.types.OwnerMask, 0), pool.texture_owners[9]);
+    try pool.clear(storage.immediate_owner);
+    try checkDependencies(&pool);
+}
+
+test "dependency indexes match admitted command scans through failures transactions and growth" {
+    var pool = try storage.Storage.init(std.testing.allocator, .{ .ceiling = 256, .reserved = 256 });
+    defer pool.deinit();
+    var random = std.Random.DefaultPrng.init(0x5a17);
+    const generator = random.random();
+    for (0..1000) |_| {
+        const owner = generator.uintLessThan(u8, storage.owner_count);
+        switch (generator.uintLessThan(u8, 4)) {
+            0, 1 => {
+                const texture_id = generator.uintLessThan(u16, 70);
+                var draw = command(0);
+                draw.sort_key = rendering.geometry.packKey(0, texture_id, pool.owners[owner].count, true);
+                _ = pool.append(owner, draw, .none) catch |err| switch (err) {
+                    error.CapacityExceeded => {
+                        try checkDependencies(&pool);
+                        continue;
+                    },
+                    else => return err,
+                };
+            },
+            2 => try pool.clear(owner),
+            3 => {
+                try pool.beginReplacement(owner);
+                const staged = generator.uintLessThan(u8, 20);
+                for (0..staged) |index| {
+                    var draw = command(0);
+                    draw.sort_key = rendering.geometry.packKey(0, 1 + @as(u16, @intCast(index % 3)), index, true);
+                    try pool.stage(draw, .none);
+                }
+                try checkDependencies(&pool);
+                if (generator.boolean()) {
+                    pool.validateReplacement() catch |err| switch (err) {
+                        error.CapacityExceeded => {
+                            pool.abortReplacement();
+                            try checkDependencies(&pool);
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    pool.commitReplacement();
+                } else pool.abortReplacement();
+            },
+            else => unreachable,
+        }
+        try checkDependencies(&pool);
+    }
+    try pool.reserve(.{ .ceiling = 512, .reserved = 512 });
+    try checkDependencies(&pool);
+    for (0..storage.owner_count) |owner| try pool.clear(@intCast(owner));
+    try checkDependencies(&pool);
+}
+
 fn payload(index: usize) storage.Payload {
     return switch (index % 4) {
         0 => .none,

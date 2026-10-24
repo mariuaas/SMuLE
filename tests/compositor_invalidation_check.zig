@@ -90,7 +90,7 @@ test "clear alpha changes empty legacy membership with a nonempty cached composi
     for ([_]i32{ 255, 0, 255, 0 }) |alpha| {
         try fixture.begin();
         try fixture.property(31, .clear_a, alpha);
-        try std.testing.expect(fixture.instance.state.layers[31].order_dirty);
+        try std.testing.expect(fixture.instance.state.layer_masks.has(.order_dirty, 31));
         try fixture.render();
         try std.testing.expectEqual(@as(usize, if (alpha == 0) 1 else 2), fixture.instance.state.retained_composite_entry_count);
         try fixture.expect(16, if (alpha == 0) .{ 1, 0, 0, 255 } else red);
@@ -132,11 +132,11 @@ test "dynamic uploads refresh every referencing layer but reuse compiled geometr
     try rendering.textures.updateDynamicTexture(fixture.instance, texture_id, 0, 0, 1, 1, &green, 4);
     try std.testing.expect(fixture.instance.changes.present_needed);
     for (0..2) |layer| {
-        try std.testing.expect(fixture.instance.state.layers[layer].target_dirty);
-        try std.testing.expect(!fixture.instance.state.layers[layer].geometry_dirty);
-        try std.testing.expect(!fixture.instance.state.layers[layer].order_dirty);
+        try std.testing.expect(fixture.instance.state.layer_masks.has(.target_dirty, layer));
+        try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, layer));
+        try std.testing.expect(!fixture.instance.state.layer_masks.has(.order_dirty, layer));
     }
-    try std.testing.expect(!fixture.instance.state.layers[2].target_dirty);
+    try std.testing.expect(!fixture.instance.state.layer_masks.has(.target_dirty, 2));
     try fixture.begin();
     try fixture.render();
     try fixture.expect(16, green);
@@ -148,7 +148,7 @@ test "dynamic uploads refresh every referencing layer but reuse compiled geometr
     fixture.instance.changes = .{};
     try std.testing.expectError(error.InvalidTextureRegion, rendering.textures.updateDynamicTexture(fixture.instance, texture_id, 1, 0, 1, 1, &red, 4));
     try std.testing.expect(!fixture.instance.changes.present_needed);
-    try std.testing.expect(!fixture.instance.state.layers[0].target_dirty);
+    try std.testing.expect(!fixture.instance.state.layer_masks.has(.target_dirty, 0));
     try fixture.begin();
     try rendering.textures.updateDynamicTexture(fixture.instance, texture_id, 0, 0, 1, 1, &red, 4);
     try fixture.render();
@@ -171,7 +171,7 @@ test "hidden retained layer keeps resource dirtiness until revival" {
     try fixture.begin();
     try fixture.render();
     try fixture.expect(16, black);
-    try std.testing.expect(fixture.instance.state.layers[0].target_dirty);
+    try std.testing.expect(fixture.instance.state.layer_masks.has(.target_dirty, 0));
     try fixture.begin();
     try fixture.property(0, .visible, 1);
     try fixture.render();
@@ -199,14 +199,14 @@ test "indexed pixel and palette edits refresh retained pixels" {
     try fixture.expect(40, red);
     try fixture.begin();
     try rendering.textures.updateGraphics8BitPixels(fixture.instance, 0, &.{1}, 1, 1);
-    try std.testing.expect(!fixture.instance.state.layers[0].geometry_dirty);
-    try std.testing.expect(!fixture.instance.state.layers[1].geometry_dirty);
+    try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, 0));
+    try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, 1));
     try fixture.render();
     try fixture.expect(16, green);
     try fixture.expect(40, green);
     const swapped = [_]u8{ 20, 210, 70, 230, 30, 50 };
     try rendering.textures.addPalette(fixture.instance, 0, 1, 2, &swapped, 2);
-    try std.testing.expect(!fixture.instance.state.layers[1].geometry_dirty);
+    try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, 1));
     try fixture.begin();
     try fixture.render();
     try fixture.expect(16, green);
@@ -272,7 +272,7 @@ test "explicit render target edits refresh referencing retained canvases" {
     try rendering.render_targets.begin(fixture.instance, handle, .{ .clear = false });
     try rendering.draw.addSolidRect(fixture.instance, 0, 0, 0, 1, 1, red[0], red[1], red[2], 255);
     try rendering.render_targets.end(fixture.instance);
-    try std.testing.expect(!fixture.instance.state.layers[0].geometry_dirty);
+    try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, 0));
     try fixture.render();
     try fixture.expect(16, red);
 }

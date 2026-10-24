@@ -609,7 +609,7 @@ test "mixed effective sampler batches preserve repeat atlas isolation cached geo
             try rendering.draw.addSolidRect(client.instance, 10, 15, 15, 1, 1, 255, 255, 255, 255);
             client.instance.faults.inject(point, 0);
             if (point == .geometry) try std.testing.expectError(error.GeometryFailed, client.execute()) else try std.testing.expectError(error.TextureStateFailed, client.execute());
-            try std.testing.expect(client.instance.state.layers[0].target_dirty);
+            try std.testing.expect(client.instance.state.layer_masks.has(.target_dirty, 0));
             try std.testing.expectError(error.FrameNotReady, rendering.compositor.present(client.instance));
             try std.testing.expectEqual(@as(usize, 1), client.instance.state.instruction_count);
             try client.begin();
@@ -676,7 +676,7 @@ test "triangle admission allocation ownership reset and untextured failure retry
             var restored: sdl.SDL_BlendMode = undefined;
             try std.testing.expect(sdl.SDL_GetRenderDrawBlendMode(client.renderer, &restored));
             try std.testing.expectEqual(@as(sdl.SDL_BlendMode, sdl.SDL_BLENDMODE_ADD), restored);
-            try std.testing.expect(client.instance.state.layers[0].target_dirty);
+            try std.testing.expect(client.instance.state.layer_masks.has(.target_dirty, 0));
             try std.testing.expectError(error.FrameNotReady, rendering.compositor.present(client.instance));
             try std.testing.expectEqual(@as(usize, 1), client.instance.state.instruction_count);
             try client.begin();

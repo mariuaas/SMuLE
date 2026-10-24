@@ -18,10 +18,10 @@ test "unavailable renderer returns errors and preserves submissions and retry re
     try context.init(std.testing.allocator, .{});
     defer context.deinit();
     context.state.instruction_count = 1;
-    context.state.layers[0].present_dirty = true;
+    context.state.layer_masks.set(.present_dirty, 0, true);
     try std.testing.expectError(error.RendererUnavailable, rendering.compositor.executeCompositeFrame(context));
     try std.testing.expect(context.changes.present_needed);
-    try std.testing.expect(context.state.layers[0].present_dirty);
+    try std.testing.expect(context.state.layer_masks.has(.present_dirty, 0));
     try std.testing.expectEqual(@as(usize, 1), context.state.instruction_count);
     try std.testing.expect(!context.frame_ready);
     try std.testing.expectError(error.RendererUnavailable, rendering.compositor.present(context));
@@ -34,6 +34,7 @@ test "resource invalidation revokes a composed frame without recompiling pixels-
     try context.init(std.testing.allocator, .{});
     defer context.deinit();
     context.state.layers[31].slab_count = 1;
+    context.state.layer_masks.syncDerived(31, &context.state.layers[31]);
     var retained = std.mem.zeroes(rendering.types.DrawInstruction);
     retained.sort_key = rendering.geometry.packKey(0, 1, 0, true);
     _ = try context.draw_storage.append(31, retained, .none);
@@ -42,9 +43,9 @@ test "resource invalidation revokes a composed frame without recompiling pixels-
     try std.testing.expect(context.frame_ready);
     rendering.layers.invalidateTexture(context, 1, false);
     try std.testing.expect(!context.frame_ready);
-    try std.testing.expect(!context.state.layers[31].geometry_dirty);
-    try std.testing.expect(context.state.layers[31].target_dirty);
-    try std.testing.expect(context.state.layers[31].present_dirty);
+    try std.testing.expect(!context.state.layer_masks.has(.geometry_dirty, 31));
+    try std.testing.expect(context.state.layer_masks.has(.target_dirty, 31));
+    try std.testing.expect(context.state.layer_masks.has(.present_dirty, 31));
 }
 
 test "invalidation checks the full bounded immediate queue without consuming submissions" {
@@ -67,5 +68,5 @@ test "invalidation checks the full bounded immediate queue without consuming sub
     try std.testing.expect(!context.frame_ready);
     try std.testing.expect(context.changes.present_needed);
     try std.testing.expectEqual(@as(usize, rendering.types.max_immediate), context.state.instruction_count);
-    try std.testing.expect(!context.state.layers[0].target_dirty);
+    try std.testing.expect(!context.state.layer_masks.has(.target_dirty, 0));
 }

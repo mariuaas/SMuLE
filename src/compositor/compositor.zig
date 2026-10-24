@@ -143,7 +143,7 @@ fn refreshRetainedLayerTarget(
     if (ctx.faults.check(.render_scale) or !sdl.SDL_SetRenderScale(ctx.context.renderer, 1, 1))
         return error.RenderScaleFailed;
 
-    const is_operation = layer.canvas_mode != .legacy_rgba;
+    const is_operation = ctx.state.layer_masks.has(.operation, layer_id);
     errdefer if (is_operation) {
         _ = sdl.SDL_SetRenderClipRect(ctx.context.renderer, null);
     };
@@ -166,7 +166,7 @@ fn refreshRetainedLayerTarget(
 
     if (layer.cached_index_count == 0 or layer.slab_count == 0) {
         try restoreMainRenderTarget(ctx);
-        layer.target_dirty = false;
+        ctx.state.layer_masks.set(.target_dirty, layer_id, false);
         return;
     }
 
@@ -197,7 +197,7 @@ fn refreshRetainedLayerTarget(
     }
 
     try restoreMainRenderTarget(ctx);
-    layer.target_dirty = false;
+    ctx.state.layer_masks.set(.target_dirty, layer_id, false);
 }
 
 fn renderOperationLayer(
@@ -213,7 +213,7 @@ fn renderOperationLayer(
         const bottom = @min(@as(u32, clip.y) + clip.h, @as(u32, @intCast(extent.height)));
         if (clip.x >= right or clip.y >= bottom) {
             try restoreMainRenderTarget(ctx);
-            layer.target_dirty = false;
+            ctx.state.layer_masks.set(.target_dirty, layer_id, false);
             return;
         }
         const rect: sdl.SDL_Rect = .{
@@ -243,7 +243,7 @@ fn renderOperationLayer(
     try renderOperationRuns(ctx, layer, vertices);
     try clearLayerClip(ctx);
     try restoreMainRenderTarget(ctx);
-    layer.target_dirty = false;
+    ctx.state.layer_masks.set(.target_dirty, layer_id, false);
 }
 
 fn renderOperationRuns(
@@ -423,9 +423,11 @@ fn compareCompositeEntry(
 fn buildRetainedCompositeOrder(ctx: *Instance) void {
     ctx.state.retained_composite_entry_count = 0;
 
-    for (ctx.state.layers, 0..) |layer, layer_id| {
-        if (!layer.visible) continue;
-        if (layer.canvas_mode == .legacy_rgba and layer.slab_count == 0 and layer.clear_a == 0) continue;
+    var remaining = ctx.state.layer_masks.presentable();
+    while (remaining != 0) {
+        const layer_id = @ctz(remaining);
+        remaining &= remaining - 1;
+        const layer = &ctx.state.layers[layer_id];
         ctx.state.retained_composite_entries[ctx.state.retained_composite_entry_count] = .{
             .composite_priority = layer.z,
             .domain = .retained,
@@ -441,9 +443,7 @@ fn buildRetainedCompositeOrder(ctx: *Instance) void {
         compareCompositeEntry,
     );
 
-    for (&ctx.state.layers) |*layer| {
-        layer.order_dirty = false;
-    }
+    ctx.state.layer_masks.order_dirty = 0;
 }
 
 fn compileImmediateGeometry(ctx: *Instance) void {
@@ -642,15 +642,14 @@ fn prepareRetainedLayer(
     ctx: *Instance,
     layer_id: usize,
 ) RenderError!void {
-    const layer = &ctx.state.layers[layer_id];
-    if (layer.canvas_mode != .legacy_rgba) {
+    if (ctx.state.layer_masks.has(.operation, layer_id)) {
         if (!ctx.context.opaque_presentation)
             return error.OpaqueBackgroundRequired;
         if (std.mem.eql(u8, std.mem.span(sdl.SDL_GetRendererName(ctx.context.renderer)), "software"))
             return error.UnsupportedCanvasBackend;
         try sampling.prepareCanvas(ctx, layer_id);
     }
-    if (layer.target_dirty) {
+    if (ctx.state.layer_masks.has(.target_dirty, layer_id)) {
         try refreshRetainedLayerTarget(ctx, layer_id);
     }
 }
@@ -661,7 +660,7 @@ fn renderRetainedLayer(
 ) RenderError!void {
     const layer = &ctx.state.layers[layer_id];
     const target_texture = getLayerTargetTexture(ctx, layer) orelse return error.TargetCreationFailed;
-    if (layer.canvas_mode == .legacy_rgba) {
+    if (!ctx.state.layer_masks.has(.operation, layer_id)) {
         if (ctx.faults.check(.texture_blend) or !sdl.SDL_SetTextureBlendMode(
             target_texture,
             toSdlBlendMode(layer.blend_mode),
@@ -714,7 +713,7 @@ fn renderRetainedLayer(
     errdefer _ = sdl.SDL_SetRenderClipRect(ctx.context.renderer, null);
     try applyLayerClip(ctx, layer);
 
-    if (layer.canvas_mode == .legacy_rgba) {
+    if (!ctx.state.layer_masks.has(.operation, layer_id)) {
         if (ctx.faults.check(.blit) or !sdl.SDL_RenderTexture(ctx.context.renderer, target_texture, &src, &dst))
             return error.BlitFailed;
         ctx.state.render_stats.draw_calls += 1;
@@ -955,9 +954,7 @@ pub fn executeCompositeFrame(ctx: *Instance) RenderError!void {
     ctx.frame_ready = false;
     errdefer {
         ctx.changes.present_needed = true;
-        for (&ctx.state.layers) |*layer| {
-            if (layer.visible) layer.present_dirty = true;
-        }
+        ctx.state.layer_masks.present_dirty |= ctx.state.layer_masks.visible;
     }
     if (ctx.draw_storage.transaction != null) return error.TransactionActive;
     if (ctx.context.renderer == null) return error.RendererUnavailable;
@@ -1031,9 +1028,7 @@ pub fn renderImmediateToCurrentTarget(ctx: *Instance) RenderError!void {
 pub fn invalidatePresentation(ctx: *Instance) void {
     ctx.frame_ready = false;
     ctx.changes.present_needed = true;
-    for (&ctx.state.layers) |*layer| {
-        if (layer.visible) layer.present_dirty = true;
-    }
+    ctx.state.layer_masks.present_dirty |= ctx.state.layer_masks.visible;
 }
 
 pub fn present(ctx: *Instance) RenderError!void {
@@ -1048,9 +1043,7 @@ pub fn present(ctx: *Instance) RenderError!void {
         return error.TargetActive;
     if (ctx.faults.check(.present) or !sdl.SDL_RenderPresent(ctx.context.renderer))
         return error.PresentFailed;
-    for (&ctx.state.layers) |*layer| {
-        if (layer.visible) layer.present_dirty = false;
-    }
+    ctx.state.layer_masks.present_dirty &= ~ctx.state.layer_masks.visible;
     resetImmediateState(ctx);
     ctx.frame_ready = false;
 }

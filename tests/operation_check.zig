@@ -432,7 +432,7 @@ test "off-canvas draws survive admission and scroll without compilation or targe
         for ([_][2]i32{ .{ 5, 4 }, .{ -2, -3 }, .{ 6, 5 }, .{ std.math.maxInt(i32), std.math.minInt(i32) } }) |scroll| {
             try rendering.layers.setContentScroll(fixture.instance, 0, scroll[0], scroll[1]);
             try std.testing.expect(!fixture.instance.frame_ready);
-            try std.testing.expect(!fixture.instance.state.layers[0].geometry_dirty);
+            try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, 0));
             try fixture.begin();
             try fixture.execute();
             const visible = scroll[0] == 5 or scroll[0] == 6;
@@ -584,7 +584,7 @@ test "negative content scroll rotated textured draws and hidden edits reuse geom
     try rendering.layers.setContentScroll(fixture.instance, 0, -5, -4);
     try rendering.layers.setSurfaceClip(fixture.instance, 0, .{ .x = 2, .y = 2, .w = 1, .h = 1 });
     try rendering.textures.updateDynamicTexture(fixture.instance, id, 0, 0, 1, 1, &.{ 80, 240, 160, 192 }, 4);
-    try std.testing.expect(fixture.instance.state.layers[0].target_dirty);
+    try std.testing.expect(fixture.instance.state.layer_masks.has(.target_dirty, 0));
     try fixture.begin();
     try fixture.execute();
     try near(background, try fixture.pixel(2, 2));
@@ -616,7 +616,7 @@ test "target resize invalidates dimension dependent references while preserving 
     try near(.{ 255, 0, 0, 255 }, try fixture.pixel(5, 0));
     try rendering.layers.setCanvasExtent(fixture.instance, 0, 6, 4);
     try std.testing.expectEqual(id, fixture.instance.state.layers[0].target_texture_id);
-    try std.testing.expect(fixture.instance.state.layers[1].geometry_dirty);
+    try std.testing.expect(fixture.instance.state.layer_masks.has(.geometry_dirty, 1));
     try fixture.begin();
     try fixture.execute();
     try std.testing.expectApproxEqAbs(@as(f32, 2.0 / 6.0), rendering.geometry.cachedVertex(fixture.instance, 1, 1).tex_coord.x, 0.0001);
@@ -1221,8 +1221,8 @@ test "mode changes rerasterize while presentation properties reuse geometry cont
     try fixture.rect(.{ 240, 80, 40, 128 }, 0, 0, 8, 8);
     for (families) |family| {
         try rendering.layers.setCanvasMode(fixture.instance, 0, family);
-        if (fixture.instance.state.layers[0].cached_vertex_count > 0) try std.testing.expect(!fixture.instance.state.layers[0].geometry_dirty);
-        try std.testing.expect(fixture.instance.state.layers[0].target_dirty);
+        if (fixture.instance.state.layers[0].cached_vertex_count > 0) try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, 0));
+        try std.testing.expect(fixture.instance.state.layer_masks.has(.target_dirty, 0));
         try fixture.begin();
         try fixture.execute();
         const vertex_count = fixture.instance.state.layers[0].cached_vertex_count;
@@ -1231,8 +1231,8 @@ test "mode changes rerasterize while presentation properties reuse geometry cont
         try fixture.begin();
         try fixture.property(.opacity, 128);
         try fixture.property(.tint_r, 128);
-        try std.testing.expect(!fixture.instance.state.layers[0].target_dirty);
-        try std.testing.expect(!fixture.instance.state.layers[0].geometry_dirty);
+        try std.testing.expect(!fixture.instance.state.layer_masks.has(.target_dirty, 0));
+        try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, 0));
         try fixture.execute();
         try std.testing.expectEqual(@as(usize, 1), fixture.instance.state.render_stats.draw_calls);
         try std.testing.expectEqual(variant, fixture.instance.state.premultiplied_textures[fixture.instance.state.white_texture_id]);
@@ -1301,15 +1301,15 @@ test "resource edits invalidate converted textures and hidden operation canvases
     try rendering.textures.updateDynamicTexture(fixture.instance, texture_id, 0, 0, 1, 1, &.{ 80, 240, 160, 192 }, 4);
     try std.testing.expect(fixture.instance.state.premultiplied_textures[texture_id] != null);
     try std.testing.expect(fixture.instance.state.operation_sources[texture_id].dirty != null);
-    try std.testing.expect(fixture.instance.state.layers[0].target_dirty);
-    try std.testing.expect(!fixture.instance.state.layers[0].geometry_dirty);
+    try std.testing.expect(fixture.instance.state.layer_masks.has(.target_dirty, 0));
+    try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, 0));
     try fixture.begin();
     try fixture.execute();
     try std.testing.expectEqual(background, try fixture.pixel(2, 2));
     try fixture.property(.visible, 1);
     fixture.instance.faults.inject(.geometry, 0);
     try std.testing.expectError(error.GeometryFailed, fixture.execute());
-    try std.testing.expect(fixture.instance.state.layers[0].target_dirty);
+    try std.testing.expect(fixture.instance.state.layer_masks.has(.target_dirty, 0));
     try std.testing.expectError(error.FrameNotReady, rendering.compositor.present(fixture.instance));
     try fixture.begin();
     try fixture.execute();
@@ -1348,8 +1348,8 @@ test "source allocation upload state accumulation and presentation failures rema
         if (case[0] != .target_creation) try std.testing.expect(rendering.textures.ensureLayerTarget(fixture.instance, 0));
         fixture.instance.faults.inject(case[0], case[2]);
         try std.testing.expectError(case[1], fixture.execute());
-        try std.testing.expectEqual(!(case[0] == .geometry and case[2] == 1), fixture.instance.state.layers[0].target_dirty);
-        try std.testing.expect(!fixture.instance.state.layers[0].geometry_dirty);
+        try std.testing.expectEqual(!(case[0] == .geometry and case[2] == 1), fixture.instance.state.layer_masks.has(.target_dirty, 0));
+        try std.testing.expect(!fixture.instance.state.layer_masks.has(.geometry_dirty, 0));
         try std.testing.expect(sdl.SDL_GetRenderTarget(fixture.renderer) == null);
         try std.testing.expectError(error.FrameNotReady, rendering.compositor.present(fixture.instance));
         try fixture.begin();
@@ -1358,13 +1358,13 @@ test "source allocation upload state accumulation and presentation failures rema
         const completed_rasters = fixture.instance.canvas_stats.rasterized_canvases;
         fixture.instance.faults.inject(.present, 0);
         try std.testing.expectError(error.PresentFailed, rendering.compositor.present(fixture.instance));
-        try std.testing.expect(!fixture.instance.state.layers[0].target_dirty);
+        try std.testing.expect(!fixture.instance.state.layer_masks.has(.target_dirty, 0));
         try fixture.begin();
         try fixture.execute();
         try near(reference(family, &.{.{ 240, 80, 40, 128 }}, 255, .{ 255, 255, 255 }), try fixture.pixel(2, 2));
         try std.testing.expectEqual(completed_rasters, fixture.instance.canvas_stats.rasterized_canvases);
         try rendering.compositor.present(fixture.instance);
-        try std.testing.expect(!fixture.instance.state.layers[0].present_dirty);
+        try std.testing.expect(!fixture.instance.state.layer_masks.has(.present_dirty, 0));
     };
 }
 
@@ -1380,7 +1380,7 @@ test "operation resource release and differently sized reuse recompile UVs and r
     fixture.instance.state.frame_state = .idle;
     try rendering.textures.destroyDynamicTexture(fixture.instance, texture_id);
     try std.testing.expect(fixture.instance.state.premultiplied_textures[texture_id] == null);
-    try std.testing.expect(fixture.instance.state.layers[0].geometry_dirty);
+    try std.testing.expect(fixture.instance.state.layer_masks.has(.geometry_dirty, 0));
     const reused = try rendering.textures.createOperationDynamicTexture(fixture.instance, 2, 1, .shared);
     try std.testing.expectEqual(texture_id, reused);
     try rendering.textures.updateDynamicTexture(fixture.instance, reused, 0, 0, 2, 1, &.{ 80, 240, 160, 192, 240, 80, 40, 128 }, 8);
@@ -1398,7 +1398,7 @@ test "operation contract explicitly rejects undeclared opaque destination withou
     try fixture.begin();
     try rendering.layers.setCanvasMode(fixture.instance, 0, .multiply);
     try std.testing.expectError(error.OpaqueBackgroundRequired, fixture.execute());
-    try std.testing.expect(fixture.instance.state.layers[0].target_dirty);
+    try std.testing.expect(fixture.instance.state.layer_masks.has(.target_dirty, 0));
     try rendering.layers.setCanvasMode(fixture.instance, 0, .legacy_rgba);
     try fixture.property(.clear_r, 240);
     try fixture.property(.clear_a, 255);
@@ -1419,7 +1419,7 @@ test "operation resources reject render-target input representations without cha
     try rendering.layers.setCanvasMode(fixture.instance, 0, .normal);
     try fixture.textured(texture_id, .{ 255, 255, 255, 255 }, 0, 0, 8, 8);
     try std.testing.expectError(error.UnsupportedOperationResource, fixture.execute());
-    try std.testing.expect(fixture.instance.state.layers[0].target_dirty);
+    try std.testing.expect(fixture.instance.state.layer_masks.has(.target_dirty, 0));
     try std.testing.expect(fixture.instance.state.premultiplied_textures[texture_id] == null);
     try std.testing.expectEqual(original, fixture.instance.state.texture_table[texture_id]);
     try rendering.layers.setCanvasMode(fixture.instance, 0, .legacy_rgba);

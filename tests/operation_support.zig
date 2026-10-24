@@ -96,7 +96,7 @@ pub const Fixture = struct {
             try self.begin();
             try rendering.layers.setCanvasMode(self.instance, 0, family);
             try std.testing.expectError(error.UnsupportedCanvasBackend, self.execute());
-            try std.testing.expect(self.instance.state.layers[0].target_dirty);
+            try std.testing.expect(self.instance.state.layer_masks.has(.target_dirty, 0));
             try std.testing.expect(!self.instance.frame_ready);
             try std.testing.expectError(error.FrameNotReady, rendering.compositor.present(self.instance));
         }

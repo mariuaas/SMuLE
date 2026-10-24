@@ -25,6 +25,7 @@ pub const State = struct {
     active_render_target: i16 = -1,
     sorted_draw_indices: []t.SortedDrawRef = &.{},
     layers: [t.max_layers]t.LayerState = [_]t.LayerState{.{}} ** t.max_layers,
+    layer_masks: t.LayerMasks = .{},
     instruction_count: usize = 0,
     immediate_run_count: usize = 0,
     composite_entry_count: usize = 0,
@@ -65,6 +66,7 @@ pub const State = struct {
         self.render_targets = [_]t.RenderTarget{.{}} ** t.max_render_targets;
         self.active_render_target = -1;
         self.sorted_draw_indices = &.{};
+        self.layer_masks = .{};
         for (&self.layers) |*layer| {
             layer.* = .{};
         }

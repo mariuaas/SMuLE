@@ -279,7 +279,8 @@ pub const Graphics = struct {
             shared.textures.releaseTextureId(&self.compositor, layer.target_texture_id);
             layer.target_texture_id = 0;
             layer.backing = .{};
-            layer.target_dirty = true;
+            self.compositor.state.layer_masks.set(.padded_backing, layer_id, false);
+            self.compositor.state.layer_masks.set(.target_dirty, layer_id, true);
             self.invalidatePresentation();
         }
     }

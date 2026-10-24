@@ -6,6 +6,15 @@ pub const max_palettes = 32;
 pub const max_immediate = 16384;
 pub const max_sprite_batch_commands = 2048;
 pub const max_layers = 32;
+pub const OwnerMask = u64;
+pub const retained_owner_bits: OwnerMask = (@as(OwnerMask, 1) << max_layers) - 1;
+pub const immediate_owner_bit: OwnerMask = @as(OwnerMask, 1) << max_layers;
+
+pub fn ownerBit(owner: usize) OwnerMask {
+    std.debug.assert(owner <= max_layers);
+    return @as(OwnerMask, 1) << @intCast(owner);
+}
+
 pub const max_layer_batch_commands = 512;
 pub const max_texture_runs_per_layer = max_slab_size;
 pub const max_slab_size = 256;
@@ -194,7 +203,6 @@ pub const LayerState = struct {
     content_scroll_y: i32 = 0,
     surface_clip: SurfaceClip = .{},
     z: i16 = 0,
-    visible: bool = true,
     opacity: u8 = 255,
     tint_r: u8 = 255,
     tint_g: u8 = 255,
@@ -203,10 +211,6 @@ pub const LayerState = struct {
     clear_g: u8 = 0,
     clear_b: u8 = 0,
     clear_a: u8 = 0,
-    geometry_dirty: bool = false,
-    order_dirty: bool = false,
-    target_dirty: bool = false,
-    present_dirty: bool = false,
     slab_count: u32 = 0,
     target_texture_id: u16 = 0,
     cached_vertex_start: u32 = 0,
@@ -224,6 +228,43 @@ pub const LayerState = struct {
     clip_w: u16 = 0,
     clip_h: u16 = 0,
     blend_mode: u8 = 0,
+};
+
+pub const LayerMasks = struct {
+    visible: OwnerMask = retained_owner_bits,
+    nonempty: OwnerMask = 0,
+    operation: OwnerMask = 0,
+    clear_alpha_nonzero: OwnerMask = 0,
+    geometry_dirty: OwnerMask = 0,
+    order_dirty: OwnerMask = 0,
+    target_dirty: OwnerMask = 0,
+    present_dirty: OwnerMask = 0,
+    bilinear_canvas: OwnerMask = 0,
+    padded_backing: OwnerMask = 0,
+
+    pub fn has(self: *const LayerMasks, comptime field: std.meta.FieldEnum(LayerMasks), layer_id: usize) bool {
+        std.debug.assert(layer_id < max_layers);
+        return @field(self, @tagName(field)) & ownerBit(layer_id) != 0;
+    }
+
+    pub fn set(self: *LayerMasks, comptime field: std.meta.FieldEnum(LayerMasks), layer_id: usize, enabled: bool) void {
+        std.debug.assert(layer_id < max_layers);
+        const plane = &@field(self, @tagName(field));
+        const bit = ownerBit(layer_id);
+        if (enabled) plane.* |= bit else plane.* &= ~bit;
+    }
+
+    pub fn syncDerived(self: *LayerMasks, layer_id: usize, layer: *const LayerState) void {
+        self.set(.nonempty, layer_id, layer.slab_count != 0);
+        self.set(.operation, layer_id, layer.canvas_mode != .legacy_rgba);
+        self.set(.clear_alpha_nonzero, layer_id, layer.clear_a != 0);
+        self.set(.bilinear_canvas, layer_id, layer.sampling == .bilinear);
+        self.set(.padded_backing, layer_id, layer.backing.border != 0);
+    }
+
+    pub fn presentable(self: *const LayerMasks) OwnerMask {
+        return self.visible & (self.operation | self.nonempty | self.clear_alpha_nonzero);
+    }
 };
 
 pub const LayerPropWake = enum {

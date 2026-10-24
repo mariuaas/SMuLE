@@ -35,7 +35,7 @@ pub fn addAffineSprite(
         return error.WrongFrameState;
     if (sprite.layer_id >= t.max_layers)
         return error.InvalidLayerId;
-    if (ctx.state.layers[sprite.layer_id].canvas_mode == .legacy_rgba)
+    if (!ctx.state.layer_masks.has(.operation, sprite.layer_id))
         return error.OperationCanvasRequired;
     if (sprite.texture_id == 0 or
         sprite.texture_id >= t.max_texture_ids or
@@ -65,7 +65,7 @@ pub fn addTexturedTriangle(
         return error.WrongFrameState;
     if (triangle.layer_id >= t.max_layers)
         return error.InvalidLayerId;
-    if (ctx.state.layers[triangle.layer_id].canvas_mode == .legacy_rgba)
+    if (!ctx.state.layer_masks.has(.operation, triangle.layer_id))
         return error.OperationCanvasRequired;
     const texture_id = if (triangle.texture_id == 0xffff) 0 else triangle.texture_id;
     if (triangle.texture_id != 0xffff and
@@ -96,7 +96,7 @@ pub fn addLine(
         return error.WrongFrameState;
     if (line.layer_id >= t.max_layers)
         return error.InvalidLayerId;
-    if (ctx.state.layers[line.layer_id].canvas_mode == .legacy_rgba)
+    if (!ctx.state.layer_masks.has(.operation, line.layer_id))
         return error.OperationCanvasRequired;
     const slot = ctx.draw_storage.owners[line.layer_id].count;
     if (ctx.faults.check(.line_metadata_allocation)) return error.OutOfMemory;
@@ -135,10 +135,11 @@ fn admit(
     } else {
         const layer = &ctx.state.layers[owner];
         layer.slab_count = ctx.draw_storage.owners[owner].count;
-        layer.geometry_dirty = true;
-        layer.order_dirty = true;
-        layer.target_dirty = true;
-        layer.present_dirty = true;
+        ctx.state.layer_masks.set(.nonempty, owner, layer.slab_count != 0);
+        ctx.state.layer_masks.set(.geometry_dirty, owner, true);
+        ctx.state.layer_masks.set(.order_dirty, owner, true);
+        ctx.state.layer_masks.set(.target_dirty, owner, true);
+        ctx.state.layer_masks.set(.present_dirty, owner, true);
         ctx.changes.scene_changed = true;
     }
     ctx.state.draw_list_sorted = false;
@@ -166,7 +167,7 @@ pub fn addOperationQuadUV(
         return error.WrongFrameState;
     if (layer_id >= t.max_layers)
         return error.InvalidLayerId;
-    if (ctx.state.layers[layer_id].canvas_mode == .legacy_rgba)
+    if (!ctx.state.layer_masks.has(.operation, layer_id))
         return error.OperationCanvasRequired;
     for ([_]f32{
         source.x,
@@ -242,7 +243,7 @@ fn queueDrawInstructionWithTexture(
         return error.InvalidLayerId;
     }
     if (ctx.state.operation_sources[options.texture_id].exclusive and
-        (options.layer_id == t.immediate_layer_id or ctx.state.layers[options.layer_id].canvas_mode == .legacy_rgba))
+        (options.layer_id == t.immediate_layer_id or !ctx.state.layer_masks.has(.operation, options.layer_id)))
         return error.UnsupportedOperationResource;
 
     var flip: u16 = 0;

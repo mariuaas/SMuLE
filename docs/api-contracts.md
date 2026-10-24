@@ -84,6 +84,18 @@ Source migrations must update those consumers together and preserve layout and
 rendering semantics. C-compatible structs/types are retained at these existing
 SDL and transport boundaries; replacing them is a separate API decision.
 
+Layer visibility and geometry/order/target/presentation dirtiness are authoritative
+in `state.layer_masks`, not `LayerState` booleans. Use `has(.field, layer_id)` and
+`set(.field, layer_id, enabled)` for low-level access. Layer snapshots retain their
+boolean fields. Derived masks track nonempty owners, operation mode, nonzero clear
+alpha, bilinear canvas sampling and padded backing. Prefer the layer/resource APIs;
+low-level changes to the corresponding records must call `syncDerived` afterward.
+`OwnerMask` uses bits 0-31 for retained layers and bit 32 for immediate ownership.
+Storage append, clear and successful replacement maintain exact texture/owner
+dependencies. Staging, rejected admission and aborted replacement leave live
+membership unchanged. Dependencies survive texture release and ID reuse; admitted
+command texture IDs must not be mutated in backing directly.
+
 Debug diagnostics remain opt-in through `debug_mode`; scoped logging lets the
 application additionally filter the library's messages. Diagnostics do not
 replace returned errors. Test-only support modules are not production APIs.

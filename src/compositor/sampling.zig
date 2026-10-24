@@ -429,7 +429,7 @@ pub fn prepareCanvas(
     layer_id: usize,
 ) Error!void {
     const layer = &ctx.state.layers[layer_id];
-    if (layer.sampling != .bilinear or layer.backing.border != 0) return;
+    if (!ctx.state.layer_masks.has(.bilinear_canvas, layer_id) or ctx.state.layer_masks.has(.padded_backing, layer_id)) return;
     const extent = textures.layerExtent(ctx, layer);
     if (extent.width <= 0 or extent.height <= 0)
         return error.TargetCreationFailed;
@@ -447,7 +447,7 @@ pub fn prepareCanvas(
             else => error.TargetCreationFailed,
         };
     errdefer textures.destroyLayerBacking(ctx, texture, backing);
-    const dirty = layer.target_dirty;
+    const dirty = ctx.state.layer_masks.has(.target_dirty, layer_id);
     if (layer.target_texture_id != 0 and !dirty) {
         const source = ctx.state.texture_table[layer.target_texture_id] orelse
             return error.TargetCreationFailed;
@@ -479,7 +479,7 @@ pub fn prepareCanvas(
     const had_target = layer.target_texture_id != 0;
     if (!textures.installLayerBacking(ctx, layer_id, texture, backing))
         return error.TargetCreationFailed;
-    layer.target_dirty = dirty or !had_target;
+    ctx.state.layer_masks.set(.target_dirty, layer_id, dirty or !had_target);
 }
 
 pub fn sourceRectangle(

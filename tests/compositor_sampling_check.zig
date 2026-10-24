@@ -309,20 +309,27 @@ test "padded promotion respects renderer limits budgets and texture ID reuse" {
     try std.testing.expectError(error.SamplingBudgetExceeded, client.execute());
     try std.testing.expectEqual(old, client.instance.state.texture_table[target_id]);
     try std.testing.expectEqual(@as(u8, 0), layer.backing.border);
+    try std.testing.expect(client.instance.state.layer_masks.has(.bilinear_canvas, 0));
+    try std.testing.expect(!client.instance.state.layer_masks.has(.padded_backing, 0));
     client.instance.sampling_cache.texture_bytes = 0;
     try client.begin();
     try client.execute();
+    try std.testing.expect(client.instance.state.layer_masks.has(.padded_backing, 0));
     rendering.textures.destroyLogicalLayerTargets(client.instance);
     try std.testing.expectEqual(@as(usize, 0), client.instance.sampling_cache.texture_bytes);
     try std.testing.expectEqual(@as(c_int, 0), layer.backing.width);
+    try std.testing.expect(!client.instance.state.layer_masks.has(.padded_backing, 0));
     try client.begin();
     try client.execute();
+    try std.testing.expect(client.instance.state.layer_masks.has(.padded_backing, 0));
     try std.testing.expectEqual(target_id, layer.target_texture_id);
     try checkCanvas(&client, .multiply, &([_][4]u8{.{ 255, 255, 255, 255 }} ** 64));
     const limit = sdl.SDL_GetNumberProperty(sdl.SDL_GetRendererProperties(client.fixture.renderer), sdl.SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, 0);
     if (limit <= 0 or limit > 65535) return;
     try rendering.layers.setCanvasSampling(client.instance, 0, .nearest);
     try rendering.layers.setCanvasExtent(client.instance, 0, @intCast(limit), 1);
+    try std.testing.expect(!client.instance.state.layer_masks.has(.bilinear_canvas, 0));
+    try std.testing.expect(!client.instance.state.layer_masks.has(.padded_backing, 0));
     try client.begin();
     try client.execute();
     const maximum = client.instance.state.texture_table[target_id];
@@ -365,7 +372,7 @@ test "clean promotion failures keep old pixels ownership and submissions retryab
         try std.testing.expectError(case[1], client.execute());
         try std.testing.expectEqual(old, client.instance.state.texture_table[target_id]);
         try std.testing.expectEqual(@as(u8, 0), layer.backing.border);
-        try std.testing.expect(!layer.target_dirty);
+        try std.testing.expect(!client.instance.state.layer_masks.has(.target_dirty, 0));
         try std.testing.expectEqual(@as(usize, 0), client.instance.sampling_cache.texture_bytes);
         try std.testing.expectEqual(@as(usize, 1), client.instance.state.instruction_count);
         try std.testing.expect(!client.instance.frame_ready);
@@ -405,7 +412,7 @@ test "dirty padded accumulation failures retain one backing and never copy on re
         try client.begin();
         client.instance.faults.inject(case[0], 0);
         try std.testing.expectError(case[1], client.execute());
-        try std.testing.expect(client.instance.state.layers[0].target_dirty);
+        try std.testing.expect(client.instance.state.layer_masks.has(.target_dirty, 0));
         try std.testing.expectError(error.FrameNotReady, rendering.compositor.present(client.instance));
         try client.begin();
         try client.execute();
@@ -429,7 +436,7 @@ test "operation source metadata edits leave legacy-only canvases and immediate r
     try rendering.sampling.setSource(client.instance, id, .bilinear, .repeat);
     try std.testing.expect(client.instance.frame_ready);
     try std.testing.expect(!client.instance.changes.present_needed);
-    try std.testing.expect(!client.instance.state.layers[0].target_dirty);
+    try std.testing.expect(!client.instance.state.layer_masks.has(.target_dirty, 0));
     try std.testing.expectEqual(@as(usize, 1), client.instance.state.instruction_count);
     try std.testing.expect(client.instance.state.operation_sources[id].pixels == null);
     try std.testing.expectEqual(@as(usize, 0), client.instance.sampling_stats.texture_allocations);
@@ -599,7 +606,7 @@ test "shared source filtering wraps NPOT taps after premultiplication and isolat
     client.instance.faults.inject(.sampling_copy, 0);
     try std.testing.expectError(error.SamplingCopyFailed, client.execute());
     try std.testing.expectError(error.FrameNotReady, rendering.compositor.present(client.instance));
-    try std.testing.expect(client.instance.state.layers[0].target_dirty);
+    try std.testing.expect(client.instance.state.layer_masks.has(.target_dirty, 0));
     try client.begin();
     try client.execute();
     try std.testing.expectEqual(allocation_count, client.instance.sampling_stats.texture_allocations);
@@ -742,11 +749,11 @@ test "source sampler edits preserve unrelated readiness invalidate hidden refere
     try std.testing.expectEqual(@as(usize, 4), client.instance.sampling_cache.texture_bytes);
     try rendering.sampling.setSource(client.instance, unrelated, .bilinear, .repeat);
     try std.testing.expect(client.instance.frame_ready);
-    client.instance.state.layers[0].visible = false;
+    client.instance.state.layer_masks.set(.visible, 0, false);
     try rendering.sampling.setSource(client.instance, id, .nearest, .clamp);
     try std.testing.expect(!client.instance.frame_ready);
-    try std.testing.expect(client.instance.state.layers[0].target_dirty);
-    client.instance.state.layers[0].visible = true;
+    try std.testing.expect(client.instance.state.layer_masks.has(.target_dirty, 0));
+    client.instance.state.layer_masks.set(.visible, 0, true);
     try client.begin();
     try client.execute();
     try rendering.sampling.setSource(client.instance, id, .nearest, .clamp);
@@ -892,7 +899,7 @@ test "rectangle cache evicts historical views across frames and retries replacem
             client.instance.faults.inject(.sampling_copy, 0);
             try std.testing.expectError(error.SamplingCopyFailed, client.execute());
             try std.testing.expect(!client.instance.frame_ready);
-            try std.testing.expect(client.instance.state.layers[0].target_dirty);
+            try std.testing.expect(client.instance.state.layer_masks.has(.target_dirty, 0));
             try client.begin();
         }
         try client.execute();

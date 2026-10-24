@@ -164,9 +164,9 @@ test "retained lines preserve raw lowering padding clips cache ownership and ret
         try std.testing.expectEqual(@as(u16, 6), instance.state.layers[0].cached_index_count);
         instance.faults.inject(.geometry, 0);
         try std.testing.expectError(error.GeometryFailed, shared.compositor.executeCompositeFrame(instance));
-        try std.testing.expect(instance.state.layers[0].target_dirty);
+        try std.testing.expect(instance.state.layer_masks.has(.target_dirty, 0));
         try shared.compositor.executeCompositeFrame(instance);
-        try std.testing.expect(!instance.state.layers[0].target_dirty);
+        try std.testing.expect(!instance.state.layer_masks.has(.target_dirty, 0));
         const stats = instance.canvas_stats;
         try shared.compositor.executeCompositeFrame(instance);
         try std.testing.expectEqualDeep(stats, instance.canvas_stats);

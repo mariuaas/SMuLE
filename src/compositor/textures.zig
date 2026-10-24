@@ -366,7 +366,8 @@ pub fn installLayerBacking(
             );
     }
     layer.backing = backing;
-    layer.target_dirty = true;
+    ctx.state.layer_masks.set(.padded_backing, layer_id, backing.border != 0);
+    ctx.state.layer_masks.set(.target_dirty, layer_id, true);
     ctx.canvas_stats.target_allocations += 1;
     return true;
 }
@@ -442,7 +443,7 @@ pub fn ensureLayerTarget(ctx: *Instance, layer_id: usize) bool {
 }
 
 pub fn destroyLayerTargets(ctx: *Instance) void {
-    for (&ctx.state.layers) |*layer| {
+    for (&ctx.state.layers, 0..) |*layer, layer_id| {
         if (layer.target_texture_id == 0) continue;
 
         if (ctx.state.texture_table[layer.target_texture_id]) |texture| {
@@ -451,12 +452,13 @@ pub fn destroyLayerTargets(ctx: *Instance) void {
         releaseTextureId(ctx, layer.target_texture_id);
         layer.target_texture_id = 0;
         layer.backing = .{};
-        layer.target_dirty = false;
+        ctx.state.layer_masks.set(.padded_backing, layer_id, false);
+        ctx.state.layer_masks.set(.target_dirty, layer_id, false);
     }
 }
 
 pub fn destroyLogicalLayerTargets(ctx: *Instance) void {
-    for (&ctx.state.layers) |*layer| {
+    for (&ctx.state.layers, 0..) |*layer, layer_id| {
         if (layer.canvas_mode != .legacy_rgba and layer.canvas_width != 0) continue;
         if (layer.target_texture_id == 0) continue;
         if (ctx.state.texture_table[layer.target_texture_id]) |texture|
@@ -464,7 +466,8 @@ pub fn destroyLogicalLayerTargets(ctx: *Instance) void {
         releaseTextureId(ctx, layer.target_texture_id);
         layer.target_texture_id = 0;
         layer.backing = .{};
-        layer.target_dirty = true;
+        ctx.state.layer_masks.set(.padded_backing, layer_id, false);
+        ctx.state.layer_masks.set(.target_dirty, layer_id, true);
     }
     ctx.frame_ready = false;
     ctx.changes.present_needed = true;
