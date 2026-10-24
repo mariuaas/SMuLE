@@ -4,6 +4,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const test_font = b.option([]const u8, "test-font", "Explicit font fixture path; no application fonts are bundled");
+    const audio = b.addModule("audio", .{
+        .root_source_file = b.path("src/audio/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const audio_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/audio_check.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    audio_tests.root_module.addImport("audio", audio);
+    const run_audio_tests = b.addRunArtifact(audio_tests);
+    b.step("audio-check", "Run SDL-independent synthesis checks").dependOn(&run_audio_tests.step);
     const compositor = b.addModule("compositor", .{
         .root_source_file = b.path("src/compositor/root.zig"),
         .target = target,
@@ -54,6 +69,7 @@ pub fn build(b: *std.Build) void {
         }
     }
     const all = b.step("test", "Run shared CPU and SDL rendering checks (consumer supplies SDL or use -Dtest-dependencies=true)");
+    all.dependOn(&run_audio_tests.step);
     for ([_][]const u8{
         "compositor_storage_unit",       "compositor_capacity_check", "compositor_check",
         "compositor_ordering_unit",      "compositor_ordering_check", "compositor_invalidation_unit",

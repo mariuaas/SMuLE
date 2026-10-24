@@ -2,17 +2,18 @@
 
 SMuLE is a small multimedia backend built on SDL3 and Zig, shared by MuM and Substrate: two private projects I've been working on for a while. They use much of the same rendering machinery, and maintaining it twice has little appeal.
 
-For now, SMuLE handles graphics and compositing, with optional font loading and glyph rasterization via FreeType. Audio synthesis and mixing, scheduling, and input handling planned for later. Still experimental, and currently no standalone app. Graphics module was extracted from Substrate, after alignment with MuM.
+For now, SMuLE handles graphics and compositing, with optional font loading and glyph rasterization via FreeType, and SDL-independent sample synthesis and mixing. Scheduling and input handling stay with the consumers. Still experimental, and currently no standalone app. Graphics module was extracted from Substrate, after alignment with MuM.
 
 ## Using it
 
-The package targets **Zig 0.16.0** and exports three modules:
+The package targets **Zig 0.16.0** and exports four modules:
 
 | Module | Function |
 | --- | --- |
 | `graphics` | Graphics API and an instance-owned renderer. No FreeType dependency. |
 | `graphics_fonts` | Graphics API plus FreeType font service. |
 | `compositor` | Underlying storage and rendering code, including diagnostics. |
+| `audio` | Instance-owned sample synthesis, ADSR and optional per-channel FIR. No SDL or FreeType dependency. |
 
 Consumer app supplies SDL module exporting `pub const sdl` (SDL3 C bindings), along with SDL library, headers and link configuration. Attach it with:
 
@@ -38,6 +39,8 @@ Main loop, scheduling, presentation, assets, scripting, protocol state, replay a
 See [API contracts](docs/api-contracts.md) for details, including ownership, scratch aliasing and submission semantics.
 
 ## Tests
+
+Audio checks need neither SDL nor FreeType: `zig build audio-check`.
 
 Standalone checks fetch and compile pinned SDL3 sources. Font checks also fetch and compile FreeType. Prebuilt SDL3 / FreeType libraries are not required. Enable those source dependencies explicitly:
 
