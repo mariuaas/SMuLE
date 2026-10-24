@@ -1,19 +1,33 @@
 const std = @import("std");
 
-/// Compatibility bundles, not interchangeable interpolation quality settings.
-pub const CompatibilityProfile = enum {
-    /// Integral MIDI pitch, metadata rate, nearest lookup, reset-and-skip loops.
-    substrate_legacy,
-    /// Q8.8 MIDI pitch, one-cycle tables, linear lookup, live bend and loop overshoot.
-    mum_legacy,
-};
+pub const NoteEncoding = enum { midi, q8_8 };
+pub const SampleTuning = enum { metadata, one_cycle };
+pub const Interpolation = enum { nearest, linear };
+pub const PitchBend = enum { ignored, applied };
+pub const PitchUpdates = enum { note_on, render };
+pub const LoopEndpoint = enum { buffer_end, tail };
+pub const LoopWrapping = enum { preserve_overshoot, reset_and_skip };
+pub const EmptySample = enum { ignore, consume_voice };
 
 pub const Config = struct {
     channel_count: usize,
     voice_count: usize,
     sample_count: usize,
     max_filter_taps: usize = 0,
-    compatibility: CompatibilityProfile,
+    /// Integer MIDI semitones, or MIDI semitones scaled by 256 for Q8.8.
+    note_encoding: NoteEncoding = .midi,
+    /// Metadata tuning uses f32 rate arithmetic; one-cycle tuning scales the
+    /// f32 note frequency by table length and output rate using f64 arithmetic.
+    sample_tuning: SampleTuning = .metadata,
+    interpolation: Interpolation = .linear,
+    pitch_bend: PitchBend = .applied,
+    /// Render updates occur per voice block, including internal FIR tiles.
+    pitch_updates: PitchUpdates = .render,
+    loop_endpoint: LoopEndpoint = .tail,
+    /// Reset-and-skip omits output and envelope advance on each wrap frame.
+    loop_wrapping: LoopWrapping = .preserve_overshoot,
+    /// Ignore invalid/empty slots before voice selection, or select then reset.
+    empty_sample: EmptySample = .ignore,
 };
 
 const phase_frac_bits = 32;
@@ -21,10 +35,11 @@ const phase_one: u64 = @as(u64, 1) << phase_frac_bits;
 const chromatic_ratio = 1.059463094359295264562;
 
 /// Borrowed immutable mono PCM. No method copies or frees this buffer.
-/// Nonempty data must have at most maxInt(u32) frames. For substrate_legacy,
+/// Nonempty data must have at most maxInt(u32) frames. With metadata tuning,
 /// freq must be finite and positive and freq / fs must remain positive; fs != 0.
-/// Loop head must be within data. Substrate ignores tail; MuM uses data.len when
-/// tail <= head, otherwise requires head < tail <= data.len. Empty data clears a slot.
+/// Loop head must be within data. A buffer_end endpoint ignores tail; a tail
+/// endpoint uses data.len when tail <= head, otherwise requires tail <= data.len.
+/// These bounds apply with either interpolation or wrapping mode. Empty data clears a slot.
 pub const Sample = struct {
     data: []const f32 = &.{},
     freq: f32 = 440,
@@ -104,7 +119,8 @@ pub fn Synth(comptime config: Config) type {
 
         /// Validate and publish a borrowed descriptor, returning the previous one.
         /// Failure changes nothing and transfers no ownership. Voices retain slot,
-        /// phase and envelope; Substrate also retains its onset pitch increment.
+        /// phase and envelope. With note_on pitch updates, the increment stays latched;
+        /// with render updates, replacement tuning is used on the next render.
         /// Keep new PCM alive and immutable until replacement or init. After this
         /// serialized call, the old buffer can be freed unless another slot or
         /// instance still borrows it (including an aliased replacement slice).
@@ -112,14 +128,14 @@ pub fn Synth(comptime config: Config) type {
             if (slot >= self.samples.len) return error.InvalidSampleIndex;
             if (sample.data.len > std.math.maxInt(u32)) return error.SampleTooLong;
             if (sample.data.len != 0) {
-                if (config.compatibility == .substrate_legacy) {
+                if (config.sample_tuning == .metadata) {
                     if (sample.fs == 0) return error.InvalidSampleRate;
                     const pitch = sample.freq / @as(f32, @floatFromInt(sample.fs));
                     if (!std.math.isFinite(sample.freq) or sample.freq <= 0 or pitch <= 0) return error.InvalidSampleFrequency;
                 }
                 if (sample.loop) {
                     if (sample.head >= sample.data.len) return error.InvalidLoopRange;
-                    if (config.compatibility == .mum_legacy and sample.tail > sample.data.len) return error.InvalidLoopRange;
+                    if (config.loop_endpoint == .tail and sample.tail > sample.data.len) return error.InvalidLoopRange;
                 }
             }
             const previous = self.samples[slot];
@@ -168,10 +184,11 @@ pub fn Synth(comptime config: Config) type {
             resetFilterHistory(channel);
         }
 
-        /// Velocity must be finite (normally [0, 1]); note units follow the profile.
-        /// MuM pbval is a finite live semitone offset; Substrate ignores it.
+        /// Velocity must be finite (normally [0, 1]); note uses note_encoding units.
+        /// When pitch_bend is applied, pbval must be a finite semitone offset.
+        /// Bend is latched or refreshed according to pitch_updates, for either tuning.
         /// Unrepresentable pitch increments silence the selected voice. Invalid
-        /// channel IDs are ignored; empty slots preserve profile-specific stealing.
+        /// channel IDs are ignored; invalid/empty slots follow empty_sample policy.
         pub fn noteOn(
             self: *Self,
             channel_id: usize,
@@ -180,7 +197,7 @@ pub fn Synth(comptime config: Config) type {
             velocity: f32,
         ) void {
             if (channel_id >= self.channels.len) return;
-            if (config.compatibility == .mum_legacy and (sample_id >= self.samples.len or self.samples[sample_id].data.len == 0)) return;
+            if (config.empty_sample == .ignore and (sample_id >= self.samples.len or self.samples[sample_id].data.len == 0)) return;
             const channel = &self.channels[channel_id];
             const index = findVoice(channel);
             const voice = &channel.voices[index];
@@ -224,23 +241,34 @@ pub fn Synth(comptime config: Config) type {
         }
 
         fn getPitch(self: *const Self, note: i32, bend: f32, sample: *const Sample) ?u64 {
-            if (config.compatibility == .substrate_legacy) {
+            if (config.sample_tuning == .metadata) {
                 const note_freq = std.math.pow(
                     f32,
                     chromatic_ratio,
-                    @as(f32, @floatFromInt(@as(i64, note) - 69)),
+                    noteExponent(note, bend),
                 ) * 440.0;
                 const sample_pitch = sample.freq / @as(f32, @floatFromInt(sample.fs));
                 const output_rate: f32 = @floatFromInt(self.sample_rate);
                 const phase_step = note_freq / output_rate / sample_pitch;
                 return phaseIncrement(phase_step * @as(f32, @floatFromInt(phase_one)));
             }
-            const semitone = @as(f32, @floatFromInt(note)) / 256.0 + bend;
-            const note_freq = std.math.pow(f32, chromatic_ratio, semitone - 69.0) * 440.0;
+            const note_freq = std.math.pow(f32, chromatic_ratio, noteExponent(note, bend)) * 440.0;
             const output_rate: f64 = @floatFromInt(self.sample_rate);
             const table_length: f64 = @floatFromInt(sample.data.len);
             const phase_step = (@as(f64, note_freq) / output_rate) * table_length;
             return phaseIncrement(phase_step * @as(f64, @floatFromInt(phase_one)));
+        }
+
+        fn noteExponent(note: i32, bend: f32) f32 {
+            if (config.note_encoding == .midi and config.pitch_bend == .ignored) {
+                return @floatFromInt(@as(i64, note) - 69);
+            }
+            const semitone = if (config.note_encoding == .q8_8)
+                @as(f32, @floatFromInt(note)) / 256.0
+            else
+                @as(f32, @floatFromInt(note));
+            const bent = if (config.pitch_bend == .applied) semitone + bend else semitone;
+            return bent - 69.0;
         }
 
         fn phaseIncrement(value: f64) ?u64 {
@@ -296,7 +324,7 @@ pub fn Synth(comptime config: Config) type {
 
         fn sampleAt(sample: *const Sample, phase: u64) ?f32 {
             const index: usize = @intCast(phase >> phase_frac_bits);
-            if (config.compatibility == .substrate_legacy) {
+            if (config.interpolation == .nearest) {
                 if (index >= sample.data.len) return null;
                 return sample.data[index];
             }
@@ -304,7 +332,7 @@ pub fn Synth(comptime config: Config) type {
             const data = sample.data;
             if (sample.loop) {
                 const head = sample.head;
-                const tail = if (sample.tail > head) sample.tail else data.len;
+                const tail = loopEnd(sample);
                 if (head >= data.len or tail > data.len or tail <= head) return 0;
                 var position = index;
                 const span = tail - head;
@@ -315,6 +343,13 @@ pub fn Synth(comptime config: Config) type {
             if (index >= data.len) return null;
             const next = @min(index + 1, data.len - 1);
             return data[index] + (data[next] - data[index]) * fraction;
+        }
+
+        fn loopEnd(sample: *const Sample) usize {
+            return if (config.loop_endpoint == .buffer_end or sample.tail <= sample.head)
+                sample.data.len
+            else
+                sample.tail;
         }
 
         fn synthesizeVoice(
@@ -331,7 +366,7 @@ pub fn Synth(comptime config: Config) type {
                 return;
             }
             const sample = &self.samples[voice.sample];
-            if (config.compatibility == .mum_legacy) {
+            if (config.pitch_updates == .render) {
                 voice.phase_inc = self.getPitch(voice.note, channel.pbval, sample) orelse {
                     resetVoice(channel, voice_index);
                     return;
@@ -342,13 +377,10 @@ pub fn Synth(comptime config: Config) type {
             for (0..frames) |frame| {
                 if (sample.loop) {
                     const head = @as(u64, sample.head) * phase_one;
-                    const loop_end = if (config.compatibility == .substrate_legacy or sample.tail <= sample.head)
-                        sample.data.len
-                    else
-                        sample.tail;
+                    const loop_end = loopEnd(sample);
                     const tail = @as(u64, loop_end) * phase_one;
                     if (voice.phase >= tail) {
-                        if (config.compatibility == .substrate_legacy) {
+                        if (config.loop_wrapping == .reset_and_skip) {
                             voice.phase = head;
                             continue;
                         }

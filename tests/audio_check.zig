@@ -5,14 +5,28 @@ const SampleSynth = audio.Synth(.{
     .channel_count = 2,
     .voice_count = 2,
     .sample_count = 2,
-    .compatibility = .substrate_legacy,
+    .note_encoding = .midi,
+    .sample_tuning = .metadata,
+    .interpolation = .nearest,
+    .pitch_bend = .ignored,
+    .pitch_updates = .note_on,
+    .loop_endpoint = .buffer_end,
+    .loop_wrapping = .reset_and_skip,
+    .empty_sample = .consume_voice,
 });
 const TableSynth = audio.Synth(.{
     .channel_count = 2,
     .voice_count = 2,
     .sample_count = 2,
     .max_filter_taps = 64,
-    .compatibility = .mum_legacy,
+    .note_encoding = .q8_8,
+    .sample_tuning = .one_cycle,
+    .interpolation = .linear,
+    .pitch_bend = .applied,
+    .pitch_updates = .render,
+    .loop_endpoint = .tail,
+    .loop_wrapping = .preserve_overshoot,
+    .empty_sample = .ignore,
 });
 
 fn pcmHash(samples: []const f32) u64 {
@@ -71,7 +85,7 @@ test "invalid metadata rejects publication without changing live playback" {
     try std.testing.expectEqual(@as(usize, 0), synth.channels[0].active_mask);
 }
 
-test "MuM metadata validates effective loop bounds but ignores unused frequency" {
+test "tail endpoints validate effective loop bounds but ignore unused tuning metadata" {
     var synth: TableSynth = .{};
     synth.init(48000);
     try std.testing.expectError(error.InvalidLoopRange, synth.replaceSample(0, .{ .data = &.{ 1, 2 }, .loop = true, .tail = 3 }));
@@ -104,6 +118,173 @@ test "unrepresentable sample pitch and live bend silence safely" {
     table.render(&output);
     try std.testing.expectEqual(@as(usize, 0), table.channels[0].active_mask);
     try std.testing.expectEqualSlices(f32, &.{ 0, 0 }, &output);
+}
+
+test "nearest interpolation independently preserves loop overshoot and descriptor tail" {
+    const Synth = audio.Synth(.{
+        .channel_count = 1,
+        .voice_count = 1,
+        .sample_count = 1,
+        .interpolation = .nearest,
+        .pitch_bend = .ignored,
+    });
+    var synth: Synth = .{};
+    synth.init(1);
+    _ = try synth.replaceSample(0, .{ .data = &.{ 1, 2, 4, 8 }, .freq = 880, .fs = 3, .loop = true, .head = 1, .tail = 3 });
+    synth.setADSR(0, 0, 0, 1, 0);
+    synth.noteOn(0, 0, 69, 1);
+    var output: [12]f32 = undefined;
+    synth.render(&output);
+    for ([_]f32{ 0.5, 1, 1, 2, 2, 1 }, 0..) |expected, frame| {
+        try std.testing.expectEqual(expected, output[frame * 2]);
+        try std.testing.expectEqual(expected, output[frame * 2 + 1]);
+    }
+    try std.testing.expectEqual(@as(i64, 6), synth.channels[0].voices[0].delta);
+}
+
+test "linear metadata playback uses the selected endpoint for interpolation" {
+    inline for (.{ audio.LoopEndpoint.buffer_end, .tail }) |endpoint| {
+        const Synth = audio.Synth(.{
+            .channel_count = 1,
+            .voice_count = 1,
+            .sample_count = 1,
+            .loop_endpoint = endpoint,
+        });
+        var synth: Synth = .{};
+        synth.init(1);
+        _ = try synth.replaceSample(0, .{ .data = &.{ 1, 3, 7 }, .freq = 880, .fs = 1, .loop = true, .head = 1, .tail = 2 });
+        synth.setADSR(0, 0, 0, 1, 0);
+        synth.noteOn(0, 0, 69, 1);
+        var output: [12]f32 = undefined;
+        synth.render(&output);
+        const expected = if (endpoint == .buffer_end)
+            [_]f32{ 0.5, 1, 1.5, 2.5, 3.5, 2.5 }
+        else
+            [_]f32{ 0.5, 1, 1.5, 1.5, 1.5, 1.5 };
+        for (expected, 0..) |value, frame| try std.testing.expectEqual(value, output[frame * 2]);
+    }
+}
+
+test "linear metadata playback can reset and skip at a descriptor tail" {
+    const Synth = audio.Synth(.{
+        .channel_count = 1,
+        .voice_count = 1,
+        .sample_count = 1,
+        .loop_wrapping = .reset_and_skip,
+    });
+    var synth: Synth = .{};
+    synth.init(1);
+    _ = try synth.replaceSample(0, .{ .data = &.{ 1, 2, 4, 8 }, .freq = 880, .fs = 3, .loop = true, .head = 1, .tail = 3 });
+    synth.setADSR(0, 0, 0, 1, 0);
+    synth.noteOn(0, 0, 69, 1);
+    var output: [12]f32 = undefined;
+    synth.render(&output);
+    for ([_]f32{ 0.5, 1.5, 0, 1, 1.5, 0 }, 0..) |expected, frame| {
+        try std.testing.expectEqual(expected, output[frame * 2]);
+    }
+    try std.testing.expectEqual(@as(i64, 4), synth.channels[0].voices[0].delta);
+}
+
+test "loop validation depends on endpoint not interpolation or wrapping" {
+    inline for (.{ audio.Interpolation.nearest, .linear }) |interpolation| {
+        inline for (.{ audio.LoopWrapping.preserve_overshoot, .reset_and_skip }) |wrapping| {
+            inline for (.{ audio.LoopEndpoint.buffer_end, .tail }) |endpoint| {
+                const Synth = audio.Synth(.{
+                    .channel_count = 1,
+                    .voice_count = 1,
+                    .sample_count = 1,
+                    .interpolation = interpolation,
+                    .loop_wrapping = wrapping,
+                    .loop_endpoint = endpoint,
+                });
+                var synth: Synth = .{};
+                synth.init(44100);
+                const outside = audio.Sample{ .data = &.{ 1, 2, 4 }, .loop = true, .head = 1, .tail = 4 };
+                if (endpoint == .tail) {
+                    try std.testing.expectError(error.InvalidLoopRange, synth.replaceSample(0, outside));
+                } else {
+                    _ = try synth.replaceSample(0, outside);
+                }
+                for ([_]u32{ 0, 1 }) |tail| {
+                    _ = try synth.replaceSample(0, .{ .data = &.{ 1, 2, 4 }, .loop = true, .head = 1, .tail = tail });
+                }
+                try std.testing.expectError(error.InvalidLoopRange, synth.replaceSample(0, .{ .data = &.{1}, .loop = true, .head = 1 }));
+                _ = try synth.replaceSample(0, .{ .data = &.{1}, .head = 99, .tail = 99 });
+            }
+        }
+    }
+}
+
+test "held pitch timing and bend are independent of note encoding and tuning" {
+    inline for (.{ audio.SampleTuning.metadata, .one_cycle }) |tuning| {
+        inline for (.{ audio.NoteEncoding.midi, .q8_8 }) |encoding| {
+            inline for (.{ audio.PitchBend.ignored, .applied }) |bend| {
+                inline for (.{ audio.PitchUpdates.note_on, .render }) |updates| {
+                    const Synth = audio.Synth(.{
+                        .channel_count = 2,
+                        .voice_count = 1,
+                        .sample_count = 1,
+                        .note_encoding = encoding,
+                        .sample_tuning = tuning,
+                        .pitch_bend = bend,
+                        .pitch_updates = updates,
+                        .interpolation = .nearest,
+                    });
+                    var synth: Synth = .{};
+                    synth.init(44100);
+                    _ = try synth.replaceSample(0, .{ .data = &.{ 1, 2, 3, 4 }, .loop = true });
+                    synth.setADSR(0, 0, 0, 1, 0);
+                    const note = if (encoding == .midi) 69 else 69 * 256;
+                    synth.noteOn(0, 0, note, 1);
+                    const onset = synth.channels[0].voices[0].phase_inc;
+                    synth.channels[0].pbval = 12;
+                    synth.channels[1].pbval = 12;
+                    var output: [2]f32 = undefined;
+                    synth.render(&output);
+                    synth.noteOn(1, 0, note, 1);
+                    const bent = synth.channels[1].voices[0].phase_inc;
+                    try std.testing.expectEqual(if (updates == .render) bent else onset, synth.channels[0].voices[0].phase_inc);
+                    if (bend == .applied) try std.testing.expect(bent > onset) else try std.testing.expectEqual(onset, bent);
+                    _ = try synth.replaceSample(0, .{ .data = &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, .freq = 220, .loop = true });
+                    synth.render(&output);
+                    synth.noteOn(1, 0, note, 1);
+                    const replaced = synth.channels[1].voices[0].phase_inc;
+                    try std.testing.expect(replaced > bent);
+                    try std.testing.expectEqual(if (updates == .render) replaced else onset, synth.channels[0].voices[0].phase_inc);
+                }
+            }
+        }
+    }
+}
+
+test "invalid and empty slots independently ignore or consume the selected voice" {
+    inline for (.{ audio.EmptySample.ignore, .consume_voice }) |policy| {
+        for ([_]usize{ 1, 2 }) |invalid_slot| {
+            const Synth = audio.Synth(.{
+                .channel_count = 1,
+                .voice_count = 2,
+                .sample_count = 2,
+                .empty_sample = policy,
+            });
+            var synth: Synth = .{};
+            synth.init(44100);
+            _ = try synth.replaceSample(0, .{ .data = &.{1}, .loop = true });
+            synth.noteOn(0, 0, 69, 1);
+            synth.noteOn(0, 0, 70, 1);
+            synth.noteOn(0, invalid_slot, 71, 1);
+            const channel = &synth.channels[0];
+            try std.testing.expectEqual(@as(i32, 70), channel.voices[1].note);
+            if (policy == .ignore) {
+                try std.testing.expectEqual(@as(u2, 3), channel.active_mask);
+                try std.testing.expectEqual(@as(i32, 69), channel.voices[0].note);
+                try std.testing.expectEqual(@as(usize, 0), channel.next_cursor);
+            } else {
+                try std.testing.expectEqual(@as(u2, 2), channel.active_mask);
+                try std.testing.expectEqual(Synth.VoiceState.idle, channel.voices[0].state);
+                try std.testing.expectEqual(@as(usize, 1), channel.next_cursor);
+            }
+        }
+    }
 }
 
 test "nearest loop keeps the reset gap while linear wavetable keeps overshoot" {
@@ -248,7 +429,14 @@ test "capacities are selected by the caller rather than inherited from MuM" {
         .voice_count = 16,
         .sample_count = 80,
         .max_filter_taps = 96,
-        .compatibility = .mum_legacy,
+        .note_encoding = .q8_8,
+        .sample_tuning = .one_cycle,
+        .interpolation = .linear,
+        .pitch_bend = .applied,
+        .pitch_updates = .render,
+        .loop_endpoint = .tail,
+        .loop_wrapping = .preserve_overshoot,
+        .empty_sample = .ignore,
     });
     var synth: Synth = .{};
     synth.init(48000);
@@ -269,7 +457,14 @@ test "sample-metadata PCM matches the original Substrate control sequence bit fo
         .channel_count = 16,
         .voice_count = 8,
         .sample_count = 64,
-        .compatibility = .substrate_legacy,
+        .note_encoding = .midi,
+        .sample_tuning = .metadata,
+        .interpolation = .nearest,
+        .pitch_bend = .ignored,
+        .pitch_updates = .note_on,
+        .loop_endpoint = .buffer_end,
+        .loop_wrapping = .reset_and_skip,
+        .empty_sample = .consume_voice,
     });
     var synth: Synth = .{};
     synth.init(44100);
@@ -312,7 +507,14 @@ test "wavetable PCM matches the original MuM control sequence bit for bit" {
         .voice_count = 8,
         .sample_count = 64,
         .max_filter_taps = 64,
-        .compatibility = .mum_legacy,
+        .note_encoding = .q8_8,
+        .sample_tuning = .one_cycle,
+        .interpolation = .linear,
+        .pitch_bend = .applied,
+        .pitch_updates = .render,
+        .loop_endpoint = .tail,
+        .loop_wrapping = .preserve_overshoot,
+        .empty_sample = .ignore,
     });
     var synth: Synth = .{};
     synth.init(48000);

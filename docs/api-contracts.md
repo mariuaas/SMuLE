@@ -76,6 +76,36 @@ remain supported compatibility paths, with their existing tests. Software
 qualification checks explicit unsupported-operation rejection; it does not add
 software operation-canvas support.
 
+## Optional audio synthesis
+
+The `audio` module has no SDL or FreeType dependency. `Synth(Config)` selects
+channel, voice, sample-slot and FIR capacities independently of consumer protocol
+limits. Initialize each instance with a nonzero output sample rate. `render`
+clears and fills a caller-owned interleaved stereo `f32` slice of any even length;
+it neither allocates nor locks. Callers serialize control changes with rendering.
+`setADSR` and `setFilter` maintain derived state; after direct changes to pan,
+volume or envelope fields, call `refreshChannel`.
+
+Sample PCM is borrowed, not copied or freed by the synth. `replaceSample` validates
+metadata before publication and returns the old descriptor; failure leaves the
+slot untouched. Existing voices keep their slot and phase and see the replacement
+on the next render. Callers keep buffers alive until serialized replacement or
+reset, and own disposal; buffers still borrowed by another slot, instance or an
+aliased replacement must remain alive.
+
+Compile-time settings independently select note encoding, sample tuning,
+interpolation, bend application, pitch update timing, loop endpoint and wrapping,
+and invalid/empty-slot voice allocation. Defaults use integer MIDI, metadata
+tuning, linear interpolation, applied bend and render-time pitch updates,
+descriptor-tail loops preserving overshoot, and ignored empty slots. `pbval` is a
+semitone offset when bend is enabled. Metadata tuning retains f32 rate arithmetic;
+one-cycle tuning uses f64 rate/length arithmetic after the f32 note frequency.
+Reset-and-skip wrapping omits the boundary output frame and its envelope advance.
+FIR history survives unchanged coefficients, drains after voices stop naturally,
+and resets on changed coefficients, explicit stop or synth initialization.
+Scheduling, epoch clocks,
+action-prefix consumption, retry ownership and device lifecycle remain external.
+
 ## Diagnostics and the public boundary
 
 The `Graphics` facade is the ordinary entry point. Compositor modules, state
