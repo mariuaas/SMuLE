@@ -77,6 +77,26 @@ const Fixture = struct {
     }
 };
 
+test "clear alpha changes empty legacy membership with a nonempty cached composition list" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    try fixture.begin();
+    try fixture.property(0, .clear_a, 255);
+    try fixture.property(31, .clear_r, 230);
+    try fixture.property(31, .clear_g, 30);
+    try fixture.property(31, .clear_b, 50);
+    try fixture.render();
+    try std.testing.expectEqual(@as(usize, 1), fixture.instance.state.retained_composite_entry_count);
+    for ([_]i32{ 255, 0, 255, 0 }) |alpha| {
+        try fixture.begin();
+        try fixture.property(31, .clear_a, alpha);
+        try std.testing.expect(fixture.instance.state.layers[31].order_dirty);
+        try fixture.render();
+        try std.testing.expectEqual(@as(usize, if (alpha == 0) 1 else 2), fixture.instance.state.retained_composite_entry_count);
+        try fixture.expect(16, if (alpha == 0) .{ 1, 0, 0, 255 } else red);
+    }
+}
+
 test "retained single append refreshes an already rasterized layer without replacement" {
     for ([_]bool{ true, false }) |geometry_backend| {
         var fixture = try Fixture.init();

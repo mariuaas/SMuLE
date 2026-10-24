@@ -36,6 +36,7 @@ test "channel properties clamp and preserve distinct rasterization and presentat
     inline for (.{ "opacity", "tint_r", "tint_g", "tint_b", "clear_r", "clear_g", "clear_b", "clear_a" }) |name| {
         @field(layer, name) = 127;
         for (values) |value| {
+            const previous_alpha = layer.clear_a;
             clean(context);
             context.frame_ready = true;
             context.state.layer_prop_buffer[0] = .{
@@ -48,7 +49,7 @@ test "channel properties clamp and preserve distinct rasterization and presentat
             try std.testing.expectEqual(std.mem.startsWith(u8, name, "clear_"), layer.target_dirty);
             try std.testing.expect(layer.present_dirty);
             try std.testing.expect(!layer.geometry_dirty);
-            try std.testing.expect(!layer.order_dirty);
+            try std.testing.expectEqual(std.mem.eql(u8, name, "clear_a") and ((previous_alpha == 0) != (value.expected == 0)), layer.order_dirty);
             try std.testing.expect(context.changes.present_needed);
             try std.testing.expect(!context.changes.scene_changed);
             try std.testing.expect(!context.frame_ready);

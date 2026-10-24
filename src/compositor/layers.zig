@@ -203,6 +203,7 @@ fn applyLayerProp(
         .tint_g => return setLayerChannel(layer, &layer.tint_g, cmd.value),
         .tint_b => return setLayerChannel(layer, &layer.tint_b, cmd.value),
         .clear_r, .clear_g, .clear_b, .clear_a => {
+            const was_presentable = hasPresentableSurface(layer);
             const channel = switch (field) {
                 .clear_r => &layer.clear_r,
                 .clear_g => &layer.clear_g,
@@ -212,6 +213,7 @@ fn applyLayerProp(
             };
             const wake = setLayerChannel(layer, channel, cmd.value);
             if (wake != .none) layer.target_dirty = true;
+            if (was_presentable != hasPresentableSurface(layer)) layer.order_dirty = true;
             return wake;
         },
         .scroll_x => {
