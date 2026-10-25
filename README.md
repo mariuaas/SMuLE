@@ -53,7 +53,7 @@ zig build -Dtest-dependencies=true -Dtest-fonts=true \
 zig build compositor-affine-precision-check
 ```
 
-Run with `-Doptimize=ReleaseFast` as well. Affine precision check also needs Python 3. Software checks verify that unsupported operation blending is rejected; they don't validate rendered pixels for those operations.
+Run with `-Doptimize=ReleaseFast` as well. Software checks verify that unsupported operation blending is rejected; they don't validate rendered pixels for those operations.
 
 No font is bundled. Glyph check needs an explicit font fixture and fails without one. Applications can also run dependency test steps with their own SDL and FreeType modules.
 
